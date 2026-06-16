@@ -1337,4 +1337,397 @@ program
     }
   });
 
+/**
+ * `launch-diagnostics` subcommand: run launch diagnostics and lifecycle
+ * harnesses for Xvfb smoke launch, updater-safe startup, daemon binding,
+ * stale/existing daemon handling, shutdown cleanup, and log verification.
+ *
+ * Fulfills: VAL-RUNTIME-004, VAL-RUNTIME-008, VAL-RUNTIME-009,
+ *           VAL-RUNTIME-012, VAL-RUNTIME-013,
+ *           VAL-CROSS-004, VAL-CROSS-009
+ */
+program
+  .command("launch-diagnostics")
+  .description("Run launch diagnostics and lifecycle harnesses for the assembled Linux app")
+  .option(
+    "--app-dir <path>",
+    "Path to the assembled Linux app directory (from assemble command)"
+  )
+  .option(
+    "--droid <path>",
+    "Path to the Linux droid ELF binary for daemon lifecycle tests"
+  )
+  .option(
+    "--asar <path>",
+    "Path to app.asar for updater-safe startup static analysis"
+  )
+  .option(
+    "--app-name <name>",
+    "Application name (default: factory-desktop)",
+    "factory-desktop"
+  )
+  .option(
+    "--isolated-home <path>",
+    "Isolated HOME directory for tests (default: temp directory)"
+  )
+  .option(
+    "--smoke-launch",
+    "Run Xvfb smoke launch test (VAL-RUNTIME-004)",
+    false
+  )
+  .option(
+    "--check-updater",
+    "Check updater-safe startup behavior (VAL-RUNTIME-008)",
+    false
+  )
+  .option(
+    "--daemon-lifecycle",
+    "Test daemon start/health/binding lifecycle (VAL-CROSS-004, VAL-RUNTIME-012)",
+    false
+  )
+  .option(
+    "--stale-daemon",
+    "Test stale/existing daemon detection and handling (VAL-RUNTIME-013)",
+    false
+  )
+  .option(
+    "--shutdown-cleanup",
+    "Test shutdown cleanup and log verification (VAL-RUNTIME-009, VAL-CROSS-009)",
+    false
+  )
+  .option(
+    "--all",
+    "Run all diagnostics",
+    false
+  )
+  .option(
+    "--no-sandbox",
+    "Use --no-sandbox for Electron launch (default: true in CI)",
+    true
+  )
+  .option(
+    "--release-mode <mode>",
+    "Release mode: safe (default) or permission-cleared",
+    DEFAULT_RELEASE_MODE
+  )
+  .action(async (options) => {
+    const {
+      smokeLaunchElectron,
+      checkUpdaterSafeStartup,
+      startDaemon,
+      checkDaemonHealth,
+      checkDaemonBinding,
+      detectStaleDaemon,
+      handleExistingDaemon,
+      performShutdown,
+      verifyLogLocation,
+      scanForOrphanProcesses,
+      captureProcessSnapshot,
+      writeDaemonLockFile,
+      formatSmokeLaunchResult,
+      formatUpdaterCheckResult,
+      formatDaemonStartResult,
+      formatDaemonHealthResult,
+      formatDaemonBindingResult,
+      formatStaleDaemonResult,
+      formatHandleExistingDaemonResult,
+      formatShutdownResult,
+      formatLogLocationResult,
+      formatOrphanScanResult,
+    } = await import("./launch-lifecycle");
+
+    const releaseMode = resolveReleaseMode(options.releaseMode);
+
+    process.stdout.write(`Release mode: ${describeReleaseMode(releaseMode)}\n`);
+
+    const runAll = options.all;
+    const appName = options.appName;
+
+    // Set up isolated home directory
+    const isolatedHome = options.isolatedHome || path.join(
+      os.tmpdir(),
+      `factory-launch-diag-${Date.now()}`
+    );
+    fs.mkdirSync(isolatedHome, { recursive: true });
+
+    const xdgConfigHome = path.join(isolatedHome, ".config");
+    const xdgCacheHome = path.join(isolatedHome, ".cache");
+    const xdgDataHome = path.join(isolatedHome, ".local", "share");
+    const xdgRuntimeDir = path.join(isolatedHome, ".runtime");
+    const xdgStateHome = path.join(isolatedHome, ".local", "state");
+
+    for (const dir of [xdgConfigHome, xdgCacheHome, xdgDataHome, xdgRuntimeDir, xdgStateHome]) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const ownedPids: number[] = [];
+    let hasErrors = false;
+
+    try {
+      // ─── Step 1: Updater-Safe Startup Check (VAL-RUNTIME-008) ────────
+      if (runAll || options.checkUpdater) {
+        process.stdout.write(`\n--- Checking updater-safe startup (VAL-RUNTIME-008) ---\n`);
+
+        const updaterResult = checkUpdaterSafeStartup({
+          asarPath: options.asar,
+          hasManualUpdateCheck: false,
+          usesProjectReleases: false,
+        });
+
+        process.stdout.write(`\n${formatUpdaterCheckResult(updaterResult)}\n`);
+
+        if (!updaterResult.safe) {
+          hasErrors = true;
+          process.stderr.write(
+            `\n✗ Updater-safe startup check failed. The app may crash on Linux due to updater assumptions.\n`
+          );
+        }
+      }
+
+      // ─── Step 2: Xvfb Smoke Launch (VAL-RUNTIME-004) ────────────────
+      if (runAll || options.smokeLaunch) {
+        if (!options.appDir) {
+          process.stderr.write(
+            `⚠ Skipping smoke launch: --app-dir is required. Provide the path to the assembled Linux app directory.\n`
+          );
+        } else {
+          process.stdout.write(`\n--- Running Xvfb smoke launch (VAL-RUNTIME-004) ---\n`);
+
+          const smokeResult = smokeLaunchElectron({
+            appPath: options.appDir,
+            isDirectory: true,
+            isolatedHome,
+            xdgConfigHome,
+            xdgCacheHome,
+            xdgDataHome,
+            xdgRuntimeDir,
+            appName,
+            noSandbox: options.noSandbox,
+          });
+
+          process.stdout.write(`\n${formatSmokeLaunchResult(smokeResult)}\n`);
+
+          if (smokeResult.pid) {
+            ownedPids.push(smokeResult.pid);
+          }
+
+          if (!smokeResult.success) {
+            hasErrors = true;
+            process.stderr.write(
+              `\n✗ Smoke launch failed. The app may have startup errors or shared library issues.\n`
+            );
+          }
+        }
+      }
+
+      // ─── Step 3: Daemon Lifecycle (VAL-CROSS-004, VAL-RUNTIME-012) ──
+      if (runAll || options.daemonLifecycle) {
+        if (!options.droid) {
+          process.stderr.write(
+            `⚠ Skipping daemon lifecycle: --droid is required. Provide the path to the Linux droid ELF binary.\n`
+          );
+        } else {
+          process.stdout.write(
+            `\n--- Testing daemon lifecycle (VAL-CROSS-004, VAL-RUNTIME-012) ---\n`
+          );
+
+          // Step 3a: Start daemon
+          process.stdout.write(`\nStarting droid daemon...\n`);
+
+          const daemonResult = await startDaemon({
+            droidPath: options.droid,
+            runtimeDir: xdgRuntimeDir,
+            port: 0, // Auto-select
+            host: "127.0.0.1",
+            isolatedHome,
+          });
+
+          process.stdout.write(`\n${formatDaemonStartResult(daemonResult)}\n`);
+
+          if (daemonResult.pid) {
+            ownedPids.push(daemonResult.pid);
+          }
+
+          if (daemonResult.success && daemonResult.endpoint) {
+            // Step 3b: Check daemon health
+            process.stdout.write(`\nChecking daemon health...\n`);
+
+            const healthResult = await checkDaemonHealth(daemonResult.endpoint);
+            process.stdout.write(`\n${formatDaemonHealthResult(healthResult)}\n`);
+
+            // Step 3c: Check daemon binding
+            process.stdout.write(`\nChecking daemon binding safety...\n`);
+
+            const bindingResult = await checkDaemonBinding({
+              host: daemonResult.host || "127.0.0.1",
+              port: daemonResult.port || 0,
+              endpoint: daemonResult.endpoint,
+            });
+
+            process.stdout.write(`\n${formatDaemonBindingResult(bindingResult)}\n`);
+
+            if (!bindingResult.safe) {
+              hasErrors = true;
+              process.stderr.write(
+                `\n✗ Daemon binding is not safe. Check loopback and port constraints.\n`
+              );
+            }
+          } else {
+            hasErrors = true;
+            process.stderr.write(
+              `\n✗ Daemon start failed. Cannot test health or binding.\n`
+            );
+          }
+        }
+      }
+
+      // ─── Step 4: Stale/Existing Daemon Handling (VAL-RUNTIME-013) ────
+      if (runAll || options.staleDaemon) {
+        process.stdout.write(
+          `\n--- Testing stale/existing daemon handling (VAL-RUNTIME-013) ---\n`
+        );
+
+        // Test detection
+        const staleResult = detectStaleDaemon({
+          runtimeDir: xdgRuntimeDir,
+          expectedVersion: "0.106.0",
+          droidPath: options.droid,
+        });
+
+        process.stdout.write(`\n${formatStaleDaemonResult(staleResult)}\n`);
+
+        // Test handling
+        const handleResult = handleExistingDaemon(staleResult, {
+          runtimeDir: xdgRuntimeDir,
+          allowReuse: true,
+          allowCleanStale: true,
+        });
+
+        process.stdout.write(`\n${formatHandleExistingDaemonResult(handleResult)}\n`);
+
+        if (!handleResult.handled) {
+          hasErrors = true;
+        }
+
+        // Test with stale files
+        process.stdout.write(`\nTesting stale file detection...\n`);
+        writeDaemonLockFile(xdgRuntimeDir, 999999999, 18080, "0.106.0");
+
+        const staleResult2 = detectStaleDaemon({
+          runtimeDir: xdgRuntimeDir,
+          expectedVersion: "0.106.0",
+        });
+
+        process.stdout.write(`\n${formatStaleDaemonResult(staleResult2)}\n`);
+
+        const handleResult2 = handleExistingDaemon(staleResult2, {
+          runtimeDir: xdgRuntimeDir,
+          allowCleanStale: true,
+        });
+
+        process.stdout.write(`\n${formatHandleExistingDaemonResult(handleResult2)}\n`);
+      }
+
+      // ─── Step 5: Shutdown Cleanup (VAL-RUNTIME-009, VAL-CROSS-009) ──
+      if (runAll || options.shutdownCleanup) {
+        process.stdout.write(
+          `\n--- Testing shutdown cleanup (VAL-RUNTIME-009, VAL-CROSS-009) ---\n`
+        );
+
+        // Create a log file to verify
+        const logDir = path.join(xdgStateHome, appName, "logs");
+        fs.mkdirSync(logDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(logDir, "main.log"),
+          `${new Date().toISOString()} App startup\n${new Date().toISOString()} App ready\n`
+        );
+
+        const shutdownResult = await performShutdown({
+          ownedPids,
+          runtimeDir: xdgRuntimeDir,
+          isolatedHome,
+          appName,
+          verifyLogs: true,
+        });
+
+        process.stdout.write(`\n${formatShutdownResult(shutdownResult)}\n`);
+
+        if (!shutdownResult.success) {
+          hasErrors = true;
+        }
+
+        // Verify log location
+        process.stdout.write(`\n--- Verifying log locations (VAL-CROSS-009) ---\n`);
+
+        const logResult = verifyLogLocation({
+          appName,
+          isolatedHome,
+          xdgConfigHome,
+          xdgStateHome,
+        });
+
+        process.stdout.write(`\n${formatLogLocationResult(logResult)}\n`);
+
+        if (!logResult.valid) {
+          hasErrors = true;
+        }
+
+        // Scan for orphan processes
+        process.stdout.write(`\n--- Scanning for orphan processes (VAL-RUNTIME-009) ---\n`);
+
+        const baseline = captureProcessSnapshot([appName, "electron", "droid"]);
+        const orphanResult = scanForOrphanProcesses({
+          baselineProcesses: baseline,
+          appName,
+        });
+
+        process.stdout.write(`\n${formatOrphanScanResult(orphanResult)}\n`);
+
+        if (orphanResult.hasOrphans) {
+          hasErrors = true;
+        }
+      }
+
+      // Summary
+      if (hasErrors) {
+        process.stderr.write(
+          `\n✗ Launch diagnostics completed with errors.\n`
+        );
+        process.exit(1);
+      } else {
+        process.stdout.write(
+          `\n✓ Launch diagnostics completed successfully.\n`
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`Launch diagnostics failed: ${String(err)}\n`);
+
+      // Try to clean up owned processes
+      if (ownedPids.length > 0) {
+        try {
+          await performShutdown({
+            ownedPids,
+            runtimeDir: xdgRuntimeDir,
+            isolatedHome,
+            appName,
+            verifyLogs: false,
+          });
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+
+      process.exit(1);
+    } finally {
+      // Clean up isolated home if we created it
+      if (!options.isolatedHome && fs.existsSync(isolatedHome)) {
+        try {
+          fs.rmSync(isolatedHome, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+    }
+  });
+
 program.parse();

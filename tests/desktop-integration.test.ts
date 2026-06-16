@@ -908,6 +908,113 @@ describe("Linux Path Resolution (VAL-RUNTIME-015)", () => {
     expect(result.macPaths).toHaveLength(0);
   });
 
+  test("validateLinuxPaths detects macOS paths in ASAR static analysis", async () => {
+    const localTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-intg-asar-"));
+    try {
+      const asarDir = path.join(localTempDir, "asar-mac-paths");
+      fs.mkdirSync(asarDir, { recursive: true });
+
+      const packageDir = path.join(asarDir, "source");
+      fs.mkdirSync(packageDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          name: "desktop",
+          productName: "Factory",
+          version: "0.106.0",
+          main: "main.js",
+        })
+      );
+
+      // Create a main.js that uses macOS-style paths
+      fs.writeFileSync(
+        path.join(packageDir, "main.js"),
+        `
+const { app } = require('electron');
+const path = require('path');
+
+// macOS-style path usage that should be detected
+const userData = path.join(os.homedir(), 'Library/Application Support/Factory');
+const cachePath = path.join(os.homedir(), 'Library/Caches/Factory');
+const logPath = path.join(os.homedir(), 'Library/Logs/Factory');
+`
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const asar = require("@electron/asar");
+      const asarPath = path.join(asarDir, "app.asar");
+      await asar.createPackage(packageDir, asarPath);
+
+      const result = validateLinuxPaths({
+        appName: "factory-desktop",
+        homeDir: "/home/testuser",
+        asarPath,
+      });
+
+      expect(result.hasMacPathUsage).toBe(true);
+      expect(result.macPaths.length).toBeGreaterThan(0);
+      expect(result.macPaths.some((p) => p.includes("Library/Application Support"))).toBe(true);
+      expect(result.macPaths.some((p) => p.includes("Library/Caches"))).toBe(true);
+      expect(result.macPaths.some((p) => p.includes("Library/Logs"))).toBe(true);
+      expect(result.valid).toBe(false);
+    } finally {
+      fs.rmSync(localTempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("validateLinuxPaths passes when ASAR uses Linux paths", async () => {
+    const localTempDir = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-intg-asar-"));
+    try {
+      const asarDir = path.join(localTempDir, "asar-linux-paths");
+      fs.mkdirSync(asarDir, { recursive: true });
+
+      const packageDir = path.join(asarDir, "source");
+      fs.mkdirSync(packageDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          name: "desktop",
+          productName: "Factory",
+          version: "0.106.0",
+          main: "main.js",
+        })
+      );
+
+      // Create a main.js that uses Linux-style XDG paths
+      fs.writeFileSync(
+        path.join(packageDir, "main.js"),
+        `
+const { app } = require('electron');
+const path = require('path');
+
+// Linux-style XDG path usage
+const configDir = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'factory-desktop');
+const cacheDir = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'factory-desktop');
+const logDir = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local/state'), 'factory-desktop', 'logs');
+`
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const asar = require("@electron/asar");
+      const asarPath = path.join(asarDir, "app.asar");
+      await asar.createPackage(packageDir, asarPath);
+
+      const result = validateLinuxPaths({
+        appName: "factory-desktop",
+        homeDir: "/home/testuser",
+        asarPath,
+      });
+
+      expect(result.hasMacPathUsage).toBe(false);
+      expect(result.macPaths).toHaveLength(0);
+      expect(result.valid).toBe(true);
+    } finally {
+      fs.rmSync(localTempDir, { recursive: true, force: true });
+    }
+  });
+
   test("config dir follows XDG_CONFIG_HOME convention", () => {
     const paths = resolveLinuxAppPaths({
       appName: "factory-desktop",

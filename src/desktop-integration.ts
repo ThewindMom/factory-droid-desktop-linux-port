@@ -1270,19 +1270,34 @@ export function validateLinuxPaths(options: {
       ];
 
       for (const file of files) {
-        if (typeof file === "string" && file.endsWith(".js")) {
-          try {
-            const content = asar.extractFile(options.asarPath, file as string);
-            const contentStr = content.toString("utf-8");
+        if (typeof file !== "string") continue;
 
-            for (const pattern of macPathPatterns) {
-              if (contentStr.includes(pattern)) {
-                macPaths.push(`${file}: contains "${pattern}"`);
-              }
+        // listPackage with { isPack: true } returns entries like
+        // "pack   : /path/to/file.js". We must parse the file path
+        // from the prefixed entry before checking the extension or
+        // calling extractFile.
+        let filePath = file as string;
+        const colonIndex = filePath.indexOf(":");
+        if (colonIndex >= 0 && colonIndex < 20) {
+          // Looks like a "pack   : /path" format - extract the path after colon
+          filePath = filePath.substring(colonIndex + 1).trim();
+        }
+
+        if (!filePath.endsWith(".js")) continue;
+
+        try {
+          // Normalize path: remove leading slashes for extractFile
+          const normalizedPath = filePath.replace(/^\/+/, "");
+          const content = asar.extractFile(options.asarPath, normalizedPath);
+          const contentStr = content.toString("utf-8");
+
+          for (const pattern of macPathPatterns) {
+            if (contentStr.includes(pattern)) {
+              macPaths.push(`${filePath}: contains "${pattern}"`);
             }
-          } catch {
-            // Skip files that can't be read
           }
+        } catch {
+          // Skip files that can't be read
         }
       }
     } catch {
