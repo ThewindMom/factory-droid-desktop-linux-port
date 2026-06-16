@@ -21,7 +21,7 @@ import {
 import { validateDmg, validateArm64Dmg } from "./dmg-validator";
 import { ArtifactTracker } from "./artifact-hygiene";
 import { enforceSafeMode, describeReleaseMode } from "./safe-mode";
-import { assertRequiredTools, checkAllTools, checkTool, REQUIRED_TOOLS } from "./tool-check";
+import { assertRequiredTools, checkAllTools, REQUIRED_TOOLS } from "./tool-check";
 import { resolveVersion, isValidSemver, LATEST_VERSION_URL } from "./version-discovery";
 import {
   extractDmgPayload,
@@ -721,17 +721,24 @@ program
     process.stdout.write(`Release mode: ${describeReleaseMode(releaseMode)}\n`);
     process.stdout.write(`Targets: ${targets.join(", ")}\n`);
 
-    // Check that rpmbuild is not silently skipped (VAL-PACKAGE-010 deferred)
+    // VAL-PACKAGE-010: RPM target must fail fast with deferred diagnostic
+    // when prerequisites are not met (no rpmbuild, no approved Docker strategy)
     if (targets.includes("rpm")) {
-      const rpmTool = { name: "rpmbuild", description: "RPM builder", required: false };
-      const rpmCheck = checkTool(rpmTool);
+      const { checkRpmPrerequisites, formatRpmPrerequisiteCheckResult } =
+        await import("./packaging");
+
+      const rpmCheck = checkRpmPrerequisites();
+      process.stdout.write(`\n${formatRpmPrerequisiteCheckResult(rpmCheck)}\n`);
+
       if (!rpmCheck.available) {
         process.stderr.write(
-          `RPM target is deferred: rpmbuild is not available on this host.\n` +
-          `RPM support will be added when rpmbuild or a Docker-based build path is approved.\n`
+          `\n✗ RPM target is DEFERRED.\n${rpmCheck.diagnostic}\n\n` +
+          `RPM build was not performed. No partial .rpm artifacts have been produced.\n`
         );
         process.exit(1);
       }
+
+      process.stdout.write(`✓ RPM prerequisites are available.\n`);
     }
 
     // Determine app directory

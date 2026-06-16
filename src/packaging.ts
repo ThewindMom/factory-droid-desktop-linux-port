@@ -15,6 +15,190 @@ import * as os from "os";
 import * as crypto from "crypto";
 import { execSync, spawnSync } from "child_process";
 import { ReleaseMode } from "./config";
+import { checkTool } from "./tool-check";
+
+// ─── RPM Deferral (VAL-PACKAGE-010) ─────────────────────────────────────────
+
+/** Reasons why RPM build is deferred */
+export enum RpmDeferralReason {
+  /** rpmbuild is not installed on the host */
+  NoRpmbuild = "no-rpmbuild",
+  /** Docker is not available on the host */
+  NoDocker = "no-docker",
+  /** Docker is available but no RPM build strategy has been approved */
+  DockerNotApproved = "docker-not-approved",
+}
+
+/** Result of checking whether RPM build prerequisites are satisfied */
+export interface RpmPrerequisiteCheckResult {
+  /** Whether RPM can be built on this host */
+  available: boolean;
+  /** If deferred, the reason(s) why */
+  reasons: RpmDeferralReason[];
+  /** Human-readable diagnostic message */
+  diagnostic: string;
+}
+
+/**
+ * Check whether RPM build prerequisites are satisfied.
+ *
+ * RPM requires either:
+ * - `rpmbuild` installed on the host, OR
+ * - A verified Docker-based RPM build pipeline that is both approved and
+ *   functional (not just policy-approved but not yet implemented).
+ *
+ * VAL-PACKAGE-010: Requesting an RPM build on a host without rpmbuild
+ * or without an approved Docker build path must fail fast with a
+ * deferred-status diagnostic.
+ */
+export function checkRpmPrerequisites(): RpmPrerequisiteCheckResult {
+  const reasons: RpmDeferralReason[] = [];
+
+  // Check for rpmbuild
+  const rpmTool = { name: "rpmbuild", description: "RPM builder", required: false };
+  const rpmCheck = checkTool(rpmTool);
+  const hasRpmbuild = rpmCheck.available;
+
+  // Check for Docker availability
+  const dockerTool = { name: "docker", description: "Docker container runtime", required: false };
+  const dockerCheck = checkTool(dockerTool);
+  const hasDocker = dockerCheck.available;
+
+  // Check for approved Docker build strategy
+  // This is an environment variable that must be explicitly set to opt in
+  const dockerRpmApproved =
+    process.env.FACTORY_RPM_DOCKER_STRATEGY === "approved";
+
+  // Check if Docker-based RPM build pipeline is verified functional
+  // (i.e., an actual working Docker-based RPM build exists, not just a policy flag)
+  const dockerRpmVerified =
+    process.env.FACTORY_RPM_DOCKER_VERIFIED === "true";
+
+  if (hasRpmbuild) {
+    // rpmbuild is available - RPM builds can proceed directly
+    return {
+      available: true,
+      reasons: [],
+      diagnostic: "rpmbuild is available on this host.",
+    };
+  }
+
+  // rpmbuild not available
+  reasons.push(RpmDeferralReason.NoRpmbuild);
+
+  // Check if we have a fully verified Docker-based RPM build pipeline
+  if (hasDocker && dockerRpmApproved && dockerRpmVerified) {
+    return {
+      available: true,
+      reasons: [],
+      diagnostic:
+        "rpmbuild is not installed, but a verified Docker-based RPM build pipeline is available.",
+    };
+  }
+
+  // Check individual deferral reasons
+  if (!hasDocker) {
+    reasons.push(RpmDeferralReason.NoDocker);
+  } else if (!dockerRpmApproved) {
+    reasons.push(RpmDeferralReason.DockerNotApproved);
+  }
+
+  const diagnosticLines: string[] = [
+    "RPM target is DEFERRED on this host:",
+  ];
+
+  if (reasons.includes(RpmDeferralReason.NoRpmbuild)) {
+    diagnosticLines.push(
+      "  - rpmbuild is not installed. Install rpmbuild (e.g., sudo apt install rpm) to enable RPM builds."
+    );
+  }
+
+  if (reasons.includes(RpmDeferralReason.NoDocker)) {
+    diagnosticLines.push(
+      "  - Docker is not available. A Docker-based RPM build path could be used as an alternative."
+    );
+  }
+
+  if (reasons.includes(RpmDeferralReason.DockerNotApproved)) {
+    diagnosticLines.push(
+      "  - Docker is available but no RPM build strategy has been approved. " +
+      "Set FACTORY_RPM_DOCKER_STRATEGY=approved to enable Docker-based RPM builds."
+    );
+  }
+
+  // Even if Docker strategy is approved, the pipeline must also be verified
+  if (hasDocker && dockerRpmApproved && !dockerRpmVerified) {
+    diagnosticLines.push(
+      "  - Docker RPM build strategy is approved but the build pipeline is not yet verified. " +
+      "Set FACTORY_RPM_DOCKER_VERIFIED=true once a working Docker-based RPM build is in place."
+    );
+  }
+
+  diagnosticLines.push(
+    "RPM support will be added when rpmbuild or an approved Docker-based build path is available."
+  );
+
+  return {
+    available: false,
+    reasons,
+    diagnostic: diagnosticLines.join("\n"),
+  };
+}
+
+/**
+ * Verify that no partial .rpm artifacts exist in the output directory.
+ *
+ * VAL-PACKAGE-010: must not produce partial .rpm files.
+ *
+ * @returns List of any .rpm files found (empty if clean)
+ */
+export function findPartialRpmArtifacts(outputDir: string): string[] {
+  const rpmFiles: string[] = [];
+
+  if (!fs.existsSync(outputDir)) {
+    return rpmFiles;
+  }
+
+  const entries = fs.readdirSync(outputDir);
+  for (const entry of entries) {
+    if (entry.endsWith(".rpm")) {
+      rpmFiles.push(path.join(outputDir, entry));
+    }
+  }
+
+  // Also check the default electron-builder out/ directory
+  const outDir = path.join(process.cwd(), "out");
+  if (fs.existsSync(outDir)) {
+    const outEntries = fs.readdirSync(outDir);
+    for (const entry of outEntries) {
+      if (entry.endsWith(".rpm")) {
+        rpmFiles.push(path.join(outDir, entry));
+      }
+    }
+  }
+
+  return rpmFiles;
+}
+
+/**
+ * Format an RpmPrerequisiteCheckResult for display.
+ */
+export function formatRpmPrerequisiteCheckResult(
+  result: RpmPrerequisiteCheckResult
+): string {
+  const lines: string[] = [];
+
+  lines.push("=== RPM Prerequisite Check ===");
+  lines.push(`Status: ${result.available ? "AVAILABLE" : "DEFERRED"}`);
+
+  if (result.reasons.length > 0) {
+    lines.push(`Reasons: ${result.reasons.join(", ")}`);
+  }
+
+  lines.push(result.diagnostic);
+
+  return lines.join("\n");
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -197,11 +381,25 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     return { success: false, artifacts, errors, warnings };
   }
 
-  // Filter out unsupported targets
+  // Check RPM prerequisites and filter RPM targets with explicit deferral
+  const rpmRequested = options.targets.includes("rpm");
+  const rpmCheck = checkRpmPrerequisites();
+
+  if (rpmRequested && !rpmCheck.available) {
+    // VAL-PACKAGE-010: RPM requests fail fast with deferred diagnostic
+    errors.push(
+      `RPM target is deferred: ${rpmCheck.diagnostic.replace(/\n/g, " ")}`
+    );
+  }
+
   const validTargets = options.targets.filter((t) => {
     if (t === "rpm") {
-      warnings.push("RPM target is deferred and will not be built.");
-      return false;
+      if (!rpmCheck.available) {
+        warnings.push(rpmCheck.diagnostic);
+        return false;
+      }
+      // RPM is available; will be included in build targets
+      return true;
     }
     if (t !== "deb" && t !== "appimage") {
       warnings.push(`Unknown target: ${t}. Only "deb" and "appimage" are supported.`);
@@ -211,7 +409,14 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
   });
 
   if (validTargets.length === 0) {
-    errors.push("No valid targets specified. Supported targets: deb, appimage");
+    if (rpmRequested && !rpmCheck.available) {
+      errors.push(
+        "RPM target requested but prerequisites are not met. " +
+        "RPM is deferred until rpmbuild or an approved Docker-based build path is available."
+      );
+    } else {
+      errors.push("No valid targets specified. Supported targets: deb, appimage");
+    }
     return { success: false, artifacts, errors, warnings };
   }
 
@@ -222,7 +427,7 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
   // findArtifacts from picking up outdated .deb, .AppImage, or yml
   // files. Default is auto-clean enabled.
   if (options.clean !== false) {
-    const staleExtensions = [".deb", ".AppImage", ".yml", ".yaml", ".sha256", ".blockmap"];
+    const staleExtensions = [".deb", ".AppImage", ".rpm", ".yml", ".yaml", ".sha256", ".blockmap"];
     const dirsToClean = [options.outputDir, path.join(process.cwd(), "out")];
     for (const dirToClean of dirsToClean) {
       if (!fs.existsSync(dirToClean)) continue;
@@ -333,6 +538,25 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
 
     if (validTargets.includes("appimage") && !appImagePath) {
       errors.push("AppImage was not produced.");
+    }
+
+    // VAL-PACKAGE-010: Verify no partial .rpm artifacts were produced
+    const partialRpmFiles = findPartialRpmArtifacts(options.outputDir);
+    if (partialRpmFiles.length > 0) {
+      errors.push(
+        `Unexpected .rpm artifacts found in output directory. ` +
+        `RPM is deferred and no .rpm files should be produced. ` +
+        `Files: ${partialRpmFiles.join(", ")}`
+      );
+      // Clean up the partial RPM artifacts
+      for (const rpmFile of partialRpmFiles) {
+        try {
+          fs.unlinkSync(rpmFile);
+          warnings.push(`Removed unexpected partial RPM artifact: ${path.basename(rpmFile)}`);
+        } catch {
+          // Best-effort cleanup
+        }
+      }
     }
 
     return {

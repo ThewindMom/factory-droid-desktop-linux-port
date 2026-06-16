@@ -164,6 +164,19 @@ export function generateReleaseMetadata(
     errors.push("No artifact paths provided for release metadata generation.");
   }
 
+  // VAL-PACKAGE-010: Release metadata must not claim RPM availability.
+  // Reject any .rpm artifact paths to prevent misleading metadata.
+  const rpmArtifacts = options.artifactPaths.filter((p) =>
+    p.endsWith(".rpm")
+  );
+  if (rpmArtifacts.length > 0) {
+    errors.push(
+      `Release metadata must not include RPM artifacts. RPM is deferred and ` +
+      `its availability must not be claimed in release metadata. ` +
+      `Rejected files: ${rpmArtifacts.map((p) => path.basename(p)).join(", ")}`
+    );
+  }
+
   // Validate that artifact files exist
   const existingArtifacts: string[] = [];
   for (const artifactPath of options.artifactPaths) {
@@ -384,6 +397,27 @@ export function validateReleaseMetadataCompleteness(
   const feedValidation = validateFeedUrl(document.feedUrl);
   if (!feedValidation.valid) {
     errors.push(feedValidation.reason || "Invalid feed URL");
+  }
+
+  // VAL-PACKAGE-010: Release metadata must not claim RPM availability.
+  // Check that no referenced files are RPM artifacts.
+  for (const file of document.files) {
+    const urlParts = file.url.split("/");
+    const filename = urlParts[urlParts.length - 1];
+    if (filename.endsWith(".rpm")) {
+      errors.push(
+        `Release metadata claims RPM availability for "${filename}". ` +
+        `RPM is deferred and must not appear in release metadata.`
+      );
+    }
+  }
+
+  // Also check the primary path field
+  if (document.path && document.path.endsWith(".rpm")) {
+    errors.push(
+      `Release metadata primary path references an RPM artifact: "${document.path}". ` +
+      `RPM is deferred and must not appear in release metadata.`
+    );
   }
 
   // Check required fields
