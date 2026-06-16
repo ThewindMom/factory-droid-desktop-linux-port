@@ -28,6 +28,23 @@ import {
   formatExtractionResult,
   formatDeterminismResult,
 } from "./dmg-extraction";
+import {
+  compareAsarParity,
+  formatParityResult,
+} from "./parity-validation";
+import {
+  validateRuntimePayloadForLinux,
+  formatRuntimeValidationResult,
+  BinaryType,
+} from "./runtime-classifier";
+import {
+  resolveDroid,
+  validateExistingDroid,
+  formatDroidResult,
+  VersionPolicy,
+  DROID_DOWNLOAD_URL_TEMPLATE,
+  DROID_SHA256_URL_TEMPLATE,
+} from "./droid-resolver";
 
 const program = new Command();
 
@@ -377,6 +394,64 @@ program
         process.exit(1);
       }
 
+      // VAL-EXTRACT-003: Parity check with arm64 DMG
+      // VAL-EXTRACT-012: Arm64 DMG is validated before parity checks
+      if (options.arm64Dmg) {
+        process.stdout.write(`\nValidating arm64 DMG and checking app.asar parity...\n`);
+
+        const parityWorkDir = path.join(workDir, "parity-check");
+        if (fs.existsSync(parityWorkDir)) {
+          fs.rmSync(parityWorkDir, { recursive: true, force: true });
+        }
+        fs.mkdirSync(parityWorkDir, { recursive: true });
+
+        const parityResult = compareAsarParity(
+          options.dmg,
+          options.arm64Dmg,
+          parityWorkDir
+        );
+
+        process.stdout.write(`\n${formatParityResult(parityResult)}\n`);
+
+        if (!parityResult.valid) {
+          process.stderr.write(
+            `\n✗ Arm64 DMG validation or app.asar parity check failed. ` +
+            `The application payloads differ between architectures.\n`
+          );
+          const cleaned = tracker.cleanupOnFailure();
+          if (cleaned.length > 0) {
+            process.stderr.write(
+              `Cleaned up partial artifacts: ${cleaned.join(", ")}\n`
+            );
+          }
+          process.exit(1);
+        }
+      }
+
+      // VAL-EXTRACT-005: Validate that macOS runtime components are not used
+      {
+        const droidInDmg = path.join(
+          extractDir,
+          "Factory/Factory.app/Contents/Resources/bin/droid"
+        );
+
+        if (fs.existsSync(droidInDmg)) {
+          process.stdout.write(`\nChecking DMG-bundled droid binary classification...\n`);
+
+          const runtimeValidation = validateRuntimePayloadForLinux(droidInDmg);
+          process.stdout.write(
+            `\n${formatRuntimeValidationResult(runtimeValidation)}\n`
+          );
+
+          if (runtimeValidation.classifications["droid"]?.type === "mach-o") {
+            process.stdout.write(
+              `  Note: DMG-bundled droid is macOS Mach-O and must be replaced ` +
+              `with a Linux ELF binary for the Linux port.\n`
+            );
+          }
+        }
+      }
+
       // VAL-EXTRACT-008: Deterministic extraction check
       if (options.verifyDeterminism) {
         process.stdout.write(`\nVerifying deterministic extraction...\n`);
@@ -592,5 +667,207 @@ function collectDistArtifacts(projectRoot: string): string[] {
 
   return artifacts;
 }
+
+/**
+ * `resolve-droid` subcommand: download and verify the Linux x86_64 droid binary.
+ *
+ * VAL-EXTRACT-006: Linux droid binary matches selected version policy.
+ * VAL-EXTRACT-009: Droid download checksum is verified.
+ */
+program
+  .command("resolve-droid")
+  .description("Download and verify the Linux x86_64 Factory CLI droid binary")
+  .requiredOption(
+    "--factory-version <version>",
+    "Factory Desktop version to resolve droid for"
+  )
+  .option(
+    "--version-policy <policy>",
+    'Version policy: "exact" or "fallback-to-latest" (default)',
+    "fallback-to-latest"
+  )
+  .option(
+    "--output-dir <dir>",
+    "Directory to save the droid binary (defaults to work/droid/)"
+  )
+  .option(
+    "--existing-droid <path>",
+    "Validate an existing droid binary instead of downloading"
+  )
+  .option(
+    "--download-url <url>",
+    "Override the download URL (for testing)"
+  )
+  .option(
+    "--checksum-url <url>",
+    "Override the checksum URL (for testing)"
+  )
+  .option(
+    "--timeout <ms>",
+    "Download timeout in milliseconds",
+    "120000"
+  )
+  .option(
+    "--release-mode <mode>",
+    "Release mode: safe (default) or permission-cleared",
+    DEFAULT_RELEASE_MODE
+  )
+  .action(async (options) => {
+    const releaseMode = resolveReleaseMode(options.releaseMode);
+    const projectRoot = process.cwd();
+    const dirs = resolveDirs(projectRoot);
+
+    process.stdout.write(`Release mode: ${describeReleaseMode(releaseMode)}\n`);
+
+    // Validate version
+    if (!isValidSemver(options.factoryVersion)) {
+      process.stderr.write(
+        `Invalid version format: "${options.factoryVersion}". Expected semver (X.Y.Z).\n`
+      );
+      process.exit(1);
+    }
+
+    // Resolve version policy
+    let versionPolicy: VersionPolicy;
+    if (options.versionPolicy === "exact") {
+      versionPolicy = VersionPolicy.Exact;
+    } else if (options.versionPolicy === "fallback-to-latest") {
+      versionPolicy = VersionPolicy.FallbackToLatest;
+    } else {
+      process.stderr.write(
+        `Invalid version policy: "${options.versionPolicy}". Must be "exact" or "fallback-to-latest".\n`
+      );
+      process.exit(1);
+    }
+
+    process.stdout.write(
+      `Factory version: ${options.factoryVersion}\n` +
+        `Version policy: ${versionPolicy}\n` +
+        `Download URL template: ${DROID_DOWNLOAD_URL_TEMPLATE}\n` +
+        `Checksum URL template: ${DROID_SHA256_URL_TEMPLATE}\n`
+    );
+
+    const outputDir = options.outputDir || path.join(dirs.work, "droid");
+    const timeoutMs = parseInt(options.timeout, 10);
+
+    // Track artifacts for hygiene
+    const tracker = new ArtifactTracker(projectRoot);
+
+    try {
+      ensureGeneratedDirs(dirs);
+      tracker.track(outputDir, "Droid binary output");
+
+      let result;
+
+      if (options.existingDroid) {
+        // Validate existing droid binary
+        process.stdout.write(`\nValidating existing droid binary: ${options.existingDroid}\n`);
+        result = validateExistingDroid(
+          options.existingDroid,
+          options.factoryVersion,
+          { versionPolicy }
+        );
+      } else {
+        // Download and verify droid
+        process.stdout.write(`\nDownloading Linux x86_64 droid binary...\n`);
+        result = await resolveDroid(options.factoryVersion, outputDir, {
+          versionPolicy,
+          timeoutMs,
+          downloadUrlOverride: options.downloadUrl,
+          checksumUrlOverride: options.checksumUrl,
+        });
+      }
+
+      process.stdout.write(`\n${formatDroidResult(result)}\n`);
+
+      if (!result.success) {
+        process.stderr.write(
+          `\n✗ Linux droid binary resolution failed.\n`
+        );
+        const cleaned = tracker.cleanupOnFailure();
+        if (cleaned.length > 0) {
+          process.stderr.write(
+            `Cleaned up partial artifacts: ${cleaned.join(", ")}\n`
+          );
+        }
+        process.exit(1);
+      }
+
+      // Final git status check
+      const finalGitCheck = tracker.verifyGitIgnored(projectRoot);
+      if (!finalGitCheck.clean) {
+        process.stderr.write(
+          `\nERROR: Proprietary artifacts detected in tracked locations: ` +
+          `${finalGitCheck.tracked.join(", ")}\n`
+        );
+        process.exit(1);
+      }
+
+      process.stdout.write(
+        `\n✓ Linux droid binary resolved. Binary is in generated directories.\n`
+      );
+    } catch (err) {
+      process.stderr.write(`Droid resolution failed: ${String(err)}\n`);
+      const cleaned = tracker.cleanupOnFailure();
+      if (cleaned.length > 0) {
+        process.stderr.write(
+          `Cleaned up partial artifacts: ${cleaned.join(", ")}\n`
+        );
+      }
+      process.exit(1);
+    }
+  });
+
+/**
+ * `validate-runtime` subcommand: validate runtime binaries for Linux.
+ *
+ * VAL-EXTRACT-005: Mac runtime components are not accepted for Linux payload.
+ */
+program
+  .command("validate-runtime")
+  .description("Validate that runtime binaries are compatible with Linux")
+  .requiredOption(
+    "--droid-path <path>",
+    "Path to the droid binary to validate"
+  )
+  .option(
+    "--expected-type <type>",
+    'Expected binary type: "elf" (default) or "mach-o"',
+    "elf"
+  )
+  .option(
+    "--expected-arch <arch>",
+    'Expected architecture: "x86_64" (default) or "arm64"',
+    "x86_64"
+  )
+  .action((options) => {
+    const expectedType =
+      options.expectedType === "mach-o" ? "mach-o" : "elf";
+    const expectedArch = options.expectedArch || "x86_64";
+
+    process.stdout.write(
+      `Validating runtime binary: ${options.droidPath}\n` +
+        `  Expected type: ${expectedType}\n` +
+        `  Expected architecture: ${expectedArch}\n`
+    );
+
+    const result = validateRuntimePayloadForLinux(options.droidPath, {
+      expectedType: expectedType === "elf" ? BinaryType.ELF : BinaryType.MachO,
+      expectedArchitecture: expectedArch,
+    });
+
+    process.stdout.write(`\n${formatRuntimeValidationResult(result)}\n`);
+
+    if (!result.valid) {
+      process.stderr.write(
+        `\n✗ Runtime validation failed: macOS runtime components detected or binary is incompatible.\n`
+      );
+      process.exit(1);
+    }
+
+    process.stdout.write(
+      `\n✓ Runtime binary validated for Linux.\n`
+    );
+  });
 
 program.parse();

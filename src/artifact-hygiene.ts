@@ -10,17 +10,31 @@ import * as path from "path";
 import { execSync } from "child_process";
 import { GENERATED_DIRS } from "./config";
 
-/** Patterns that identify proprietary-derived artifacts */
+/** Patterns that identify proprietary-derived artifacts.
+ *  These are matched against file basenames to detect proprietary
+ *  payloads in tracked source locations. Source files (.ts, .js)
+ *  are excluded from binary pattern matching. */
 const PROPRIETARY_PATTERNS = [
   "app.asar",
   "Factory.app",
-  "droid", // downloaded Linux CLI binary
   ".deb",
   ".rpm",
   ".AppImage",
   "Info.plist",
   "electron.icns",
 ];
+
+/** Binary file patterns that indicate downloaded/extracted proprietary artifacts.
+ *  These are only matched against non-source files. */
+const PROPRIETARY_BINARY_PATTERNS = [
+  "droid", // downloaded Linux CLI binary (not a source file)
+];
+
+/** Source file extensions that should never be flagged as proprietary binaries */
+const SOURCE_EXTENSIONS = new Set([
+  ".ts", ".js", ".tsx", ".jsx", ".json", ".md", ".yaml", ".yml",
+  ".css", ".html", ".sh", ".py",
+]);
 
 /** Tracked artifact for cleanup on failure */
 export interface TrackedArtifact {
@@ -135,8 +149,7 @@ export class ArtifactTracker {
     }
 
     this.walkDir(srcDir, (filePath) => {
-      const basename = path.basename(filePath);
-      if (PROPRIETARY_PATTERNS.some((pattern) => basename.includes(pattern))) {
+      if (this.isProprietaryMatch(filePath)) {
         violations.push(filePath);
       }
     });
@@ -173,8 +186,7 @@ export class ArtifactTracker {
         }
 
         // Also check for proprietary file patterns
-        const basename = path.basename(filePath);
-        if (PROPRIETARY_PATTERNS.some((p) => basename.includes(p))) {
+        if (this.isProprietaryMatch(filePath)) {
           tracked.push(filePath);
         }
       }
@@ -215,5 +227,29 @@ export class ArtifactTracker {
         callback(fullPath);
       }
     }
+  }
+
+  /**
+   * Check if a file path matches any proprietary artifact pattern.
+   * Source code files (.ts, .js, etc.) are excluded from binary pattern
+   * matching since they are not proprietary-derived payloads.
+   */
+  private isProprietaryMatch(filePath: string): boolean {
+    const basename = path.basename(filePath);
+    const ext = path.extname(basename).toLowerCase();
+
+    // Always check top-level proprietary patterns (app.asar, Factory.app, etc.)
+    if (PROPRIETARY_PATTERNS.some((pattern) => basename.includes(pattern))) {
+      return true;
+    }
+
+    // Only check binary patterns against non-source files
+    if (!SOURCE_EXTENSIONS.has(ext)) {
+      if (PROPRIETARY_BINARY_PATTERNS.some((pattern) => basename.includes(pattern))) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }
