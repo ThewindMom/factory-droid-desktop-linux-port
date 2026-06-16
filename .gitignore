@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Generated / extracted Factory-derived payloads (proprietary)
+work/
+build/
+dist/
+out/
+.cache/
+
+# Factory binary artifacts (never commit proprietary-derived binaries)
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.asar
+*.exe
+*.sha256
+
+# Downloaded CLI binaries
+droid
+!src/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TypeScript build output
+*.tsbuildinfo
+
+# Coverage
+coverage/
