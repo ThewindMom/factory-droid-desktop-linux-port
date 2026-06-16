@@ -22,6 +22,7 @@ import {
   computeFileHash,
   formatAsarMetadata,
   formatValidationResult,
+  parseIsPackEntry,
   AsarPackageMetadata,
 } from "../src/asar-metadata";
 
@@ -325,5 +326,43 @@ describe("computeFileHash", () => {
       fs.unlinkSync(tmpFile1);
       fs.unlinkSync(tmpFile2);
     }
+  });
+});
+
+// ─── parseIsPackEntry ──────────────────────────────────────────────────────
+
+describe("parseIsPackEntry", () => {
+  it("parses standard isPack prefixed entries", () => {
+    // Real output from asar.listPackage(path, { isPack: true })
+    expect(parseIsPackEntry("pack   : /path/to/file.js")).toBe("path/to/file.js");
+    expect(parseIsPackEntry("pack : /main.js")).toBe("main.js");
+  });
+
+  it("handles entries with varying whitespace after colon", () => {
+    expect(parseIsPackEntry("pack   :   /foo/bar.js")).toBe("foo/bar.js");
+    expect(parseIsPackEntry("pack:file.js")).toBe("file.js");
+  });
+
+  it("strips leading slashes from the path", () => {
+    expect(parseIsPackEntry("pack   : ///deep/nested.js")).toBe("deep/nested.js");
+    expect(parseIsPackEntry("pack   : /single.js")).toBe("single.js");
+  });
+
+  it("returns null for entries without a colon", () => {
+    expect(parseIsPackEntry("no-colon-here")).toBeNull();
+    expect(parseIsPackEntry("")).toBeNull();
+  });
+
+  it("handles entries with no leading slash in path", () => {
+    expect(parseIsPackEntry("pack   : path/to/file.js")).toBe("path/to/file.js");
+  });
+
+  it("handles directory entries", () => {
+    expect(parseIsPackEntry("pack   : /some/directory")).toBe("some/directory");
+  });
+
+  it("handles map entries (non-pack prefix)", () => {
+    // listPackage may also return entries with "map" prefix
+    expect(parseIsPackEntry("map    : /some/file.js")).toBe("some/file.js");
   });
 });

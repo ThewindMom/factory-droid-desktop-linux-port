@@ -1216,7 +1216,7 @@ program
       let iconResult;
 
       if (options.icns && fs.existsSync(options.icns)) {
-        iconResult = generateLinuxIcons({
+        iconResult = await generateLinuxIcons({
           icnsPath: options.icns,
           outputDir,
           appName: options.execName,

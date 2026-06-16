@@ -82,7 +82,8 @@ function createMockElectronDist(baseDir: string): string {
  */
 async function createMockAsar(
   outputDir: string,
-  version = "0.106.0"
+  version = "0.106.0",
+  productName = "Factory"
 ): Promise<string> {
   const asarDir = path.join(outputDir, "asar");
   fs.mkdirSync(asarDir, { recursive: true });
@@ -99,7 +100,7 @@ async function createMockAsar(
     path.join(packageDir, "package.json"),
     JSON.stringify({
       name: "desktop",
-      productName: "Factory",
+      productName,
       version,
       main: ".vite/build/main.js",
       devDependencies: { electron: "^39.2.7" },
@@ -318,6 +319,35 @@ describe("validateRuntimeLayout", () => {
     // Should report file type of the executable
     expect(result.executableFileType).toBeDefined();
   });
+
+  it("accepts custom executable name via appName option", async () => {
+    const appDir = await createMockAssembledApp(tempDir);
+    // Rename the executable to a custom name
+    const oldExe = path.join(appDir, "factory-desktop");
+    const newExe = path.join(appDir, "my-custom-app");
+    fs.renameSync(oldExe, newExe);
+
+    // Without appName, it should still find the renamed executable via scan
+    const result = validateRuntimeLayout(appDir);
+    expect(result.hasExecutable).toBe(true);
+
+    // With explicit appName, it should find it directly
+    const result2 = validateRuntimeLayout(appDir, { appName: "my-custom-app" });
+    expect(result2.hasExecutable).toBe(true);
+  });
+
+  it("detects single executable when no known names match", async () => {
+    const appDir = await createMockAssembledApp(tempDir);
+    // Remove the default factory-desktop executable
+    const oldExe = path.join(appDir, "factory-desktop");
+    fs.unlinkSync(oldExe);
+    // Create a differently-named executable
+    fs.writeFileSync(path.join(appDir, "custom-electron-app"), "#!/bin/sh\necho test");
+    fs.chmodSync(path.join(appDir, "custom-electron-app"), 0o755);
+
+    const result = validateRuntimeLayout(appDir);
+    expect(result.hasExecutable).toBe(true);
+  });
 });
 
 // ─── validateAsarIntact (VAL-RUNTIME-002) ──────────────────────────────────
@@ -383,6 +413,58 @@ describe("validateAsarIntact", () => {
       expect(result.metadata.version).toBe("0.106.0");
       expect(result.metadata.main).toBe(".vite/build/main.js");
     }
+  });
+
+  it("accepts non-placeholder productName when no expectedProductName is set", async () => {
+    // Create an ASAR with a future Factory productName
+    const asarPath = await createMockAsar(tempDir, "0.106.0", "Factory Desktop");
+    const appDir = path.join(tempDir, "app-future-name");
+    fs.mkdirSync(path.join(appDir, "resources"), { recursive: true });
+    fs.copyFileSync(asarPath, path.join(appDir, "resources", "app.asar"));
+    fs.mkdirSync(path.join(appDir, "resources", "bin"), { recursive: true });
+    createMockDroid(appDir);
+
+    const hash = computeFileHash(path.join(appDir, "resources", "app.asar"));
+    const result = validateAsarIntact(appDir, hash, {
+      expectedProductName: undefined, // Don't enforce a specific name
+    });
+
+    // Should pass because "Factory Desktop" is not a placeholder
+    expect(result.intact).toBe(true);
+  });
+
+  it("rejects placeholder productName like 'electron-quick-start'", async () => {
+    const asarPath = await createMockAsar(tempDir, "0.106.0", "electron-quick-start");
+    const appDir = path.join(tempDir, "app-placeholder");
+    fs.mkdirSync(path.join(appDir, "resources"), { recursive: true });
+    fs.copyFileSync(asarPath, path.join(appDir, "resources", "app.asar"));
+    fs.mkdirSync(path.join(appDir, "resources", "bin"), { recursive: true });
+    createMockDroid(appDir);
+
+    const hash = computeFileHash(path.join(appDir, "resources", "app.asar"));
+    const result = validateAsarIntact(appDir, hash, {
+      expectedProductName: undefined,
+    });
+
+    expect(result.intact).toBe(false);
+    expect(result.errors.some((e) => e.includes("placeholder"))).toBe(true);
+  });
+
+  it("enforces expectedProductName when explicitly provided", async () => {
+    const asarPath = await createMockAsar(tempDir, "0.106.0", "Factory Desktop");
+    const appDir = path.join(tempDir, "app-mismatch");
+    fs.mkdirSync(path.join(appDir, "resources"), { recursive: true });
+    fs.copyFileSync(asarPath, path.join(appDir, "resources", "app.asar"));
+    fs.mkdirSync(path.join(appDir, "resources", "bin"), { recursive: true });
+    createMockDroid(appDir);
+
+    const hash = computeFileHash(path.join(appDir, "resources", "app.asar"));
+    const result = validateAsarIntact(appDir, hash, {
+      expectedProductName: "Factory", // Explicit expectation that doesn't match
+    });
+
+    expect(result.intact).toBe(false);
+    expect(result.errors.some((e) => e.includes("expected \"Factory\""))).toBe(true);
   });
 });
 

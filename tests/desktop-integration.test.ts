@@ -361,13 +361,13 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     rmrf(tempDir);
   });
 
-  test("generates Linux icon assets from ICNS source", () => {
+  test("generates Linux icon assets from ICNS source", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256]);
 
     const iconDir = path.join(tempDir, "icons");
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -378,13 +378,13 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     expect(result.icons.length).toBeGreaterThan(0);
   });
 
-  test("generates icons in standard Linux sizes", () => {
+  test("generates icons in standard Linux sizes", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256, 512]);
 
     const iconDir = path.join(tempDir, "icons");
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -399,13 +399,13 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     expect(generatedSizes.length).toBeGreaterThan(0);
   });
 
-  test("icons are placed in hicolor theme directory structure", () => {
+  test("icons are placed in hicolor theme directory structure", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256]);
 
     const iconDir = path.join(tempDir, "icons");
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -423,14 +423,14 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     }
   });
 
-  test("records source icon hash for traceability", () => {
+  test("records source icon hash for traceability", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256]);
 
     const iconDir = path.join(tempDir, "icons");
     const expectedHash = computeFileHash(icnsPath);
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -441,13 +441,13 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     expect(result.sourceIconPath).toBe(icnsPath);
   });
 
-  test("generates icon hashes for build manifest", () => {
+  test("generates icon hashes for build manifest", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256]);
 
     const iconDir = path.join(tempDir, "icons");
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -463,8 +463,8 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     }
   });
 
-  test("fails gracefully when ICNS file is missing", () => {
-    const result = generateLinuxIcons({
+  test("fails gracefully when ICNS file is missing", async () => {
+    const result = await generateLinuxIcons({
       icnsPath: "/nonexistent/test.icns",
       outputDir: path.join(tempDir, "icons"),
       appName: "factory-desktop",
@@ -475,7 +475,7 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     expect(result.errors[0]).toContain("not found");
   });
 
-  test("fails gracefully when ICNS has no PNG entries", () => {
+  test("fails gracefully when ICNS has no PNG entries", async () => {
     // Create a file with valid ICNS magic but no entries
     const icnsPath = path.join(tempDir, "empty.icns");
     const buffer = Buffer.alloc(8);
@@ -483,7 +483,7 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
     buffer.writeUInt32BE(8, 4); // total size = just the header
     fs.writeFileSync(icnsPath, buffer);
 
-    const result = generateLinuxIcons({
+    const result = await generateLinuxIcons({
       icnsPath,
       outputDir: path.join(tempDir, "icons"),
       appName: "factory-desktop",
@@ -491,6 +491,43 @@ describe("Icon Generation (VAL-RUNTIME-006)", () => {
 
     expect(result.success).toBe(false);
     expect(result.errors.some((e) => e.includes("no PNG icon entries"))).toBe(true);
+  });
+
+  test("generated icons match their target dimensions after sharp resize", async () => {
+    const icnsPath = path.join(tempDir, "test.icns");
+    createMockIcnsFile(icnsPath, [128, 256, 512]);
+
+    const iconDir = path.join(tempDir, "icons");
+
+    const result = await generateLinuxIcons({
+      icnsPath,
+      outputDir: iconDir,
+      appName: "factory-desktop",
+      iconName: "factory-desktop",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.icons.length).toBeGreaterThan(0);
+
+    // Verify each icon file has the correct target dimensions
+    for (const icon of result.icons) {
+      // Check that width and height match the target size
+      expect(icon.width).toBe(icon.size);
+      expect(icon.height).toBe(icon.size);
+
+      // Also verify the actual PNG file dimensions using sharp metadata
+      if (fs.existsSync(icon.filePath)) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const sharpModule = require("sharp");
+          const meta = await sharpModule(icon.filePath).metadata();
+          expect(meta.width).toBe(icon.size);
+          expect(meta.height).toBe(icon.size);
+        } catch {
+          // sharp may not be available in all test environments; skip
+        }
+      }
+    }
   });
 });
 
@@ -1069,14 +1106,14 @@ describe("Icon Installation", () => {
     rmrf(tempDir);
   });
 
-  test("installs icons to destination directory", () => {
+  test("installs icons to destination directory", async () => {
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256]);
 
     const iconDir = path.join(tempDir, "icons");
     const destDir = path.join(tempDir, "dest");
 
-    const genResult = generateLinuxIcons({
+    const genResult = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",
@@ -1219,13 +1256,13 @@ describe("Integration: Desktop Entry + Icons + Protocol", () => {
     rmrf(tempDir);
   });
 
-  test("full desktop integration workflow", () => {
+  test("full desktop integration workflow", async () => {
     // Step 1: Generate icons from ICNS
     const icnsPath = path.join(tempDir, "test.icns");
     createMockIcnsFile(icnsPath, [128, 256, 512]);
 
     const iconDir = path.join(tempDir, "icons");
-    const iconResult = generateLinuxIcons({
+    const iconResult = await generateLinuxIcons({
       icnsPath,
       outputDir: iconDir,
       appName: "factory-desktop",

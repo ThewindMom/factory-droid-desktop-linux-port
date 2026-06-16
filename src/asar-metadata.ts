@@ -259,6 +259,23 @@ export function formatAsarMetadata(result: AsarMetadataResult): string {
 }
 
 /**
+ * Parse an entry from `asar.listPackage(path, { isPack: true })`.
+ *
+ * When `listPackage` is called with `{ isPack: true }`, the returned
+ * entries are prefixed strings like "pack   : /path/to/file.js" rather
+ * than bare paths. This function extracts the file path portion after
+ * the colon and strips leading slashes.
+ *
+ * Returns null if the entry cannot be parsed (e.g., no colon found).
+ */
+export function parseIsPackEntry(entry: string): string | null {
+  const colonIndex = entry.indexOf(":");
+  if (colonIndex === -1) return null;
+  const raw = entry.slice(colonIndex + 1).trim();
+  return raw.replace(/^\/+/, ""); // remove leading slashes
+}
+
+/**
  * Format metadata validation result for display.
  */
 export function formatValidationResult(

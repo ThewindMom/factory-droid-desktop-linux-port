@@ -11,6 +11,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as net from "net";
+import { parseIsPackEntry } from "./asar-metadata";
 import { execSync, spawn, ChildProcess } from "child_process";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -76,7 +77,15 @@ export interface SmokeLaunchOptions {
   startupTimeout?: number;
   /** Additional launch arguments */
   extraArgs?: string[];
-  /** Whether to use --no-sandbox (default: true for CI environments) */
+  /** Whether to use --no-sandbox (default: true for CI environments)
+   *
+   * IMPORTANT: --no-sandbox is acceptable ONLY for Xvfb smoke/diagnostic
+   * tests in CI or headless environments where the chrome-sandbox binary
+   * cannot be configured with SUID (e.g., due to AppArmor or unprivileged
+   * container restrictions). Normal packaged app launch MUST NOT silently
+   * depend on --no-sandbox; if the packaged app requires it, that
+   * requirement must be explicitly documented and surfaced to users.
+   */
   noSandbox?: boolean;
   /** Application name for process matching (default: "factory-desktop") */
   appName?: string;
@@ -451,6 +460,9 @@ export function smokeLaunchElectron(
   }
 
   // Build launch command
+  // Default to --no-sandbox for CI/Xvfb smoke tests where chrome-sandbox
+  // cannot be SUID-configured. This is acceptable ONLY for diagnostic
+  // smoke launches; normal packaged app launch must not depend on it.
   const noSandbox = options.noSandbox !== false; // Default to true
   const xvfbScreen = options.xvfbScreen || DEFAULT_XVFB_SCREEN;
   const timeout = options.startupTimeout || DEFAULT_SMOKE_LAUNCH_TIMEOUT;
@@ -776,20 +788,16 @@ export function checkUpdaterSafeStartup(options: {
       for (const file of files) {
         if (typeof file !== "string") continue;
 
-        // listPackage with { isPack: true } returns entries like "pack   : /main.js"
-        // We need to extract just the file path part
-        let filePath = file as string;
-        const colonIndex = filePath.indexOf(":");
-        if (colonIndex >= 0 && colonIndex < 20) {
-          // Looks like a "pack   : /path" format - extract the path after colon
-          filePath = filePath.substring(colonIndex + 1).trim();
-        }
+        // listPackage with { isPack: true } returns prefixed entries.
+        // Use the centralized parser to extract the file path.
+        const filePath = parseIsPackEntry(file as string);
+        if (!filePath) continue;
 
         if (!filePath.endsWith(".js")) continue;
 
         try {
-          // Normalize path: remove leading slashes for extractFile
-          const normalizedPath = filePath.replace(/^\/+/, "");
+          // Path is already normalized by parseIsPackEntry (leading slashes removed)
+          const normalizedPath = filePath;
           const content = asar.extractFile(options.asarPath, normalizedPath).toString("utf-8");
 
           // Check for autoUpdater usage

@@ -12,6 +12,7 @@ import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
 import { execSync } from "child_process";
+import { parseIsPackEntry } from "./asar-metadata";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -595,9 +596,9 @@ export function validateDesktopEntry(
  * Icon derivation is proven by recording the source icon path/hash and
  * generated icon hashes/dimensions in the build manifest.
  */
-export function generateLinuxIcons(
+export async function generateLinuxIcons(
   options: IconGenerationOptions
-): IconGenerationResult {
+): Promise<IconGenerationResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
   const icons: GeneratedIconInfo[] = [];
@@ -674,31 +675,67 @@ export function generateLinuxIcons(
     const iconFileName = `${iconName}.png`;
     const iconFilePath = path.join(sizeDir, iconFileName);
 
-    // If the source icon is the exact target size, just copy it
-    // If it's a different size, we still write the best match
-    // (proper resizing would require sharp or another image library)
-    if (entry.size !== targetSize) {
+    // Use sharp to resize the icon to the exact target dimensions.
+    // If the source is already the correct size, sharp is still used for
+    // consistency and to verify the output dimensions.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const sharpModule = require("sharp");
+      const resizeInstance = sharpModule(entry.pngData);
+      const resizedBuffer = await resizeInstance
+        .resize(targetSize, targetSize, { fit: "fill" })
+        .png()
+        .toBuffer();
+
+      fs.writeFileSync(iconFilePath, resizedBuffer);
+
+      // Verify output dimensions
+      const metaInstance = sharpModule(resizedBuffer);
+      const meta = await metaInstance.metadata();
+      const actualWidth = meta.width || targetSize;
+      const actualHeight = meta.height || targetSize;
+
+      if (actualWidth !== targetSize || actualHeight !== targetSize) {
+        warnings.push(
+          `Icon ${targetSize}x${targetSize} was resized but output dimensions are ` +
+          `${actualWidth}x${actualHeight}.`
+        );
+      }
+
+      // Compute hash and file size
+      const hash = computeFileHash(iconFilePath);
+      const stat = fs.statSync(iconFilePath);
+
+      icons.push({
+        size: targetSize,
+        filePath: iconFilePath,
+        relativePath: path.relative(options.outputDir, iconFilePath),
+        hash,
+        fileSize: stat.size,
+        width: actualWidth,
+        height: actualHeight,
+      });
+    } catch (err) {
+      // Fallback: if sharp fails, write the raw icon data without resizing
       warnings.push(
-        `Using ${entry.size}x${entry.size} icon for ${targetSize}x${targetSize} size. ` +
-        `For pixel-perfect icons, consider providing exact-size sources or installing sharp.`
+        `sharp resize failed for ${targetSize}x${targetSize}: ${String(err)}. ` +
+        `Writing unresized ${entry.size}x${entry.size} icon as fallback.`
       );
+      fs.writeFileSync(iconFilePath, entry.pngData);
+
+      const hash = computeFileHash(iconFilePath);
+      const stat = fs.statSync(iconFilePath);
+
+      icons.push({
+        size: targetSize,
+        filePath: iconFilePath,
+        relativePath: path.relative(options.outputDir, iconFilePath),
+        hash,
+        fileSize: stat.size,
+        width: entry.size,
+        height: entry.size,
+      });
     }
-
-    fs.writeFileSync(iconFilePath, entry.pngData);
-
-    // Compute hash and file size
-    const hash = computeFileHash(iconFilePath);
-    const stat = fs.statSync(iconFilePath);
-
-    icons.push({
-      size: targetSize,
-      filePath: iconFilePath,
-      relativePath: path.relative(options.outputDir, iconFilePath),
-      hash,
-      fileSize: stat.size,
-      width: entry.size,
-      height: entry.size,
-    });
   }
 
   // Validate that at least one icon was generated
@@ -1272,22 +1309,16 @@ export function validateLinuxPaths(options: {
       for (const file of files) {
         if (typeof file !== "string") continue;
 
-        // listPackage with { isPack: true } returns entries like
-        // "pack   : /path/to/file.js". We must parse the file path
-        // from the prefixed entry before checking the extension or
-        // calling extractFile.
-        let filePath = file as string;
-        const colonIndex = filePath.indexOf(":");
-        if (colonIndex >= 0 && colonIndex < 20) {
-          // Looks like a "pack   : /path" format - extract the path after colon
-          filePath = filePath.substring(colonIndex + 1).trim();
-        }
+        // listPackage with { isPack: true } returns prefixed entries.
+        // Use the centralized parser to extract the file path.
+        const filePath = parseIsPackEntry(file as string);
+        if (!filePath) continue;
 
         if (!filePath.endsWith(".js")) continue;
 
         try {
-          // Normalize path: remove leading slashes for extractFile
-          const normalizedPath = filePath.replace(/^\/+/, "");
+          // Path is already normalized by parseIsPackEntry (leading slashes removed)
+          const normalizedPath = filePath;
           const content = asar.extractFile(options.asarPath, normalizedPath);
           const contentStr = content.toString("utf-8");
 

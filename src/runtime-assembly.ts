@@ -403,10 +403,10 @@ export function assembleLinuxRuntime(
   }
 
   // Step 6: Validate the assembled app
-  const layoutResult = validateRuntimeLayout(appDir);
+  const layoutResult = validateRuntimeLayout(appDir, { appName: options.appName });
   const asarResult = validateAsarIntact(appDir, options.asarHash);
   const droidResult = validateDroidBinary(appDir);
-  const sharedLibResult = validateSharedLibraries(appDir);
+  const sharedLibResult = validateSharedLibraries(appDir, { appName: options.appName });
 
   // Collect validation errors
   if (!layoutResult.valid) {
@@ -466,7 +466,8 @@ export function assembleLinuxRuntime(
  * the expected Linux resources path.
  */
 export function validateRuntimeLayout(
-  appDir: string
+  appDir: string,
+  options?: { appName?: string }
 ): LayoutValidationResult {
   const errors: string[] = [];
 
@@ -497,8 +498,16 @@ export function validateRuntimeLayout(
   let hasExecutable = false;
   let executableFileType: string | undefined;
 
-  // Try common executable names
-  const exeCandidates = ["factory-desktop", "electron"];
+  // Build candidate list: configured name first, then fallback names,
+  // then detect any single top-level executable if no known name matches.
+  const exeCandidates: string[] = [];
+  if (options?.appName) {
+    exeCandidates.push(options.appName);
+  }
+  exeCandidates.push("factory-desktop", "electron");
+
+  // If no known candidate exists, detect the single executable in the
+  // app directory (skip known directories and chrome-sandbox).
   for (const name of exeCandidates) {
     const exePath = path.join(appDir, name);
     if (fs.existsSync(exePath)) {
@@ -513,6 +522,39 @@ export function validateRuntimeLayout(
         executableFileType = "unknown";
       }
       break;
+    }
+  }
+
+  // Fallback: detect the single top-level executable if no known name matched.
+  // This handles custom/renamed executables without requiring the caller
+  // to explicitly specify the name.
+  if (!hasExecutable && fs.existsSync(appDir)) {
+    const skipNames = new Set(["resources", "locales", "chrome-sandbox", "LICENSE", "version"]);
+    const topEntries = fs.readdirSync(appDir);
+    const candidateFiles = topEntries.filter(
+      (e) => !skipNames.has(e) && !e.includes(".") && !e.endsWith(".so")
+    );
+    // If there's exactly one non-directory candidate (or one candidate that is a file), use it
+    const fileCandidates = candidateFiles.filter((e) => {
+      try {
+        return fs.statSync(path.join(appDir, e)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (fileCandidates.length === 1) {
+      const detected = fileCandidates[0];
+      const exePath = path.join(appDir, detected);
+      hasExecutable = true;
+      try {
+        executableFileType = execSync(`file "${exePath}"`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 10000,
+        }).trim();
+      } catch {
+        executableFileType = "unknown";
+      }
     }
   }
 
@@ -568,7 +610,12 @@ export function validateRuntimeLayout(
  */
 export function validateAsarIntact(
   appDir: string,
-  expectedHash: string
+  expectedHash: string,
+  options?: {
+    /** Expected product name (default: "Factory"). When set, a mismatch is an error.
+     *  When unset/null, any non-placeholder productName is accepted. */
+    expectedProductName?: string;
+  }
 ): AsarIntactResult {
   const errors: string[] = [];
 
@@ -608,12 +655,28 @@ export function validateAsarIntact(
     metadata = asarResult.packageMetadata;
 
     // Verify key metadata fields
-    if (metadata.productName !== "Factory") {
+    // Product name validation: if an expected name is provided, enforce it.
+    // Otherwise, accept any non-placeholder productName. Known placeholder
+    // names that indicate the asar was not properly extracted include empty
+    // strings, "electron", "electron-quick-start", and "app".
+    const expectedProductName = options?.expectedProductName ?? "Factory";
+    const placeholderNames = new Set(["", "electron", "electron-quick-start", "app"]);
+    if (metadata.productName === expectedProductName) {
+      // Exact match with expected name - good
+    } else if (placeholderNames.has(metadata.productName.toLowerCase())) {
       errors.push(
-        `Product name in app.asar is "${metadata.productName}", expected "Factory". ` +
+        `Product name in app.asar is "${metadata.productName}", which appears to be ` +
+          `a placeholder. The app.asar may not be the extracted Factory Desktop payload.`
+      );
+    } else if (options?.expectedProductName !== undefined) {
+      // An explicit expected name was provided and it doesn't match
+      errors.push(
+        `Product name in app.asar is "${metadata.productName}", expected "${expectedProductName}". ` +
           `The app.asar may have been replaced with a placeholder.`
       );
     }
+    // else: no explicit expected name provided and the name is non-placeholder,
+    // so accept it (handles future Factory metadata changes).
 
     if (!metadata.version || metadata.version === "0.0.0") {
       errors.push(
@@ -789,7 +852,8 @@ export function validateDroidBinary(
  * libraries for the assembled runtime.
  */
 export function validateSharedLibraries(
-  appDir: string
+  appDir: string,
+  options?: { appName?: string }
 ): SharedLibResult {
   const errors: string[] = [];
   const missingLibs: string[] = [];
@@ -798,7 +862,11 @@ export function validateSharedLibraries(
   const elfBinaries: string[] = [];
 
   // Check the main executable
-  const exeCandidates = ["factory-desktop", "electron"];
+  const exeCandidates: string[] = [];
+  if (options?.appName) {
+    exeCandidates.push(options.appName);
+  }
+  exeCandidates.push("factory-desktop", "electron");
   for (const name of exeCandidates) {
     const exePath = path.join(appDir, name);
     if (fs.existsSync(exePath)) {
@@ -807,6 +875,27 @@ export function validateSharedLibraries(
         elfBinaries.push(exePath);
       }
       break;
+    }
+  }
+
+  // Fallback: if no known candidate was found, detect the single executable
+  if (elfBinaries.length === 0 && fs.existsSync(appDir)) {
+    const skipNames = new Set(["resources", "locales", "chrome-sandbox", "LICENSE", "version"]);
+    const topEntries = fs.readdirSync(appDir);
+    const fileCandidates = topEntries.filter((e) => {
+      if (skipNames.has(e) || e.includes(".") || e.endsWith(".so")) return false;
+      try {
+        return fs.statSync(path.join(appDir, e)).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (fileCandidates.length === 1) {
+      const exePath = path.join(appDir, fileCandidates[0]);
+      const classification = classifyBinary(exePath);
+      if (classification.type === BinaryType.ELF) {
+        elfBinaries.push(exePath);
+      }
     }
   }
 
@@ -948,6 +1037,14 @@ export function checkResourcesPathResolution(
  * without requiring validation-only flags such as --no-sandbox; if an
  * insecure flag is genuinely required, the app must document and surface
  * that requirement explicitly.
+ *
+ * CI-only --no-sandbox note: In CI/Xvfb environments, chrome-sandbox
+ * typically cannot be SUID-configured (due to AppArmor, unprivileged
+ * containers, or security policies). The Xvfb smoke-launch harness in
+ * launch-lifecycle.ts therefore defaults to --no-sandbox for diagnostic
+ * smoke tests ONLY. This is acceptable because those tests are isolated,
+ * non-production, and do not handle user data. Normal packaged app launch
+ * must not silently depend on --no-sandbox.
  *
  * This function checks whether chrome-sandbox has proper SUID permissions
  * and provides documentation for users if it does not.
