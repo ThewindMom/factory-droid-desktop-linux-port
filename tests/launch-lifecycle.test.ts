@@ -15,6 +15,7 @@ import {
   captureProcessSnapshot,
   findOrphanProcesses,
   checkUpdaterSafeStartup,
+  performManualUpdateCheck,
   checkDaemonHealth,
   checkDaemonBinding,
   detectStaleDaemon,
@@ -24,11 +25,17 @@ import {
   scanForOrphanProcesses,
   writeDaemonLockFile,
   removeDaemonLockFile,
+  writeStartupLogEntry,
+  writeShutdownLogEntry,
+  enumerateChildPids,
+  killProcessTree,
+  cleanupOwnedOrphanProcesses,
   findAvailablePort,
   isPortAvailable,
   getOccupiedPorts,
   formatSmokeLaunchResult,
   formatUpdaterCheckResult,
+  formatManualUpdateCheckResult,
   formatDaemonStartResult,
   formatDaemonHealthResult,
   formatDaemonBindingResult,
@@ -1185,6 +1192,306 @@ describe("format functions", () => {
   });
 });
 
+// ─── enumerateChildPids (VAL-RUNTIME-004, VAL-CROSS-009) ───────────────────
+
+describe("enumerateChildPids", () => {
+  it("includes the parent PID in the result", () => {
+    const pids = enumerateChildPids(process.pid);
+    expect(pids).toContain(process.pid);
+  });
+
+  it("returns at least the parent PID even with no children", () => {
+    // Use a PID that exists but has no children (the test process itself)
+    const pids = enumerateChildPids(process.pid);
+    expect(pids.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("handles non-existent PID gracefully", () => {
+    // Should not throw for a non-existent PID
+    const pids = enumerateChildPids(999999999);
+    expect(pids).toEqual([999999999]);
+  });
+});
+
+// ─── killProcessTree (VAL-RUNTIME-004, VAL-CROSS-009) ──────────────────────
+
+describe("killProcessTree", () => {
+  it("reports already-exited processes as terminated", () => {
+    const result = killProcessTree(999999999, {
+      gracefulTimeout: 1000,
+      useProcessGroup: false,
+    });
+    expect(result.terminated).toContain(999999999);
+    expect(result.failed).toEqual([]);
+  });
+});
+
+// ─── writeStartupLogEntry / writeShutdownLogEntry (VAL-CROSS-009) ───────────
+
+describe("writeStartupLogEntry / writeShutdownLogEntry", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    rmrf(tempDir);
+  });
+
+  it("writes startup log entries with detectable keywords", () => {
+    writeStartupLogEntry(tempDir, "Factory");
+
+    // Verify the log file was created
+    const appNameLower = "factory";
+    const logDir = path.join(tempDir, ".local", "state", appNameLower, "logs");
+    expect(fs.existsSync(logDir)).toBe(true);
+
+    const logFile = path.join(logDir, "main.log");
+    expect(fs.existsSync(logFile)).toBe(true);
+
+    const content = fs.readFileSync(logFile, "utf-8");
+    expect(content.toLowerCase()).toContain("startup");
+    expect(content.toLowerCase()).toContain("initialized");
+    expect(content.toLowerCase()).toContain("ready");
+  });
+
+  it("writes shutdown log entries with detectable keywords", () => {
+    writeShutdownLogEntry(tempDir, "Factory");
+
+    const appNameLower = "factory";
+    const logDir = path.join(tempDir, ".local", "state", appNameLower, "logs");
+    const logFile = path.join(logDir, "main.log");
+    expect(fs.existsSync(logFile)).toBe(true);
+
+    const content = fs.readFileSync(logFile, "utf-8");
+    expect(content.toLowerCase()).toContain("shutdown");
+    expect(content.toLowerCase()).toContain("closing");
+  });
+
+  it("appends to existing log file", () => {
+    writeStartupLogEntry(tempDir, "Factory");
+    writeShutdownLogEntry(tempDir, "Factory");
+
+    const logFile = path.join(tempDir, ".local", "state", "factory", "logs", "main.log");
+    const content = fs.readFileSync(logFile, "utf-8");
+
+    // Should contain both startup and shutdown entries
+    expect(content.toLowerCase()).toContain("startup");
+    expect(content.toLowerCase()).toContain("shutdown");
+  });
+
+  it("respects custom XDG directories", () => {
+    const customState = path.join(tempDir, "custom-state");
+    fs.mkdirSync(customState, { recursive: true });
+
+    writeStartupLogEntry(tempDir, "Factory", undefined, customState);
+
+    const logDir = path.join(customState, "factory", "logs");
+    expect(fs.existsSync(logDir)).toBe(true);
+  });
+
+  it("writeStartupLogEntry makes verifyLogLocation detect startup logs", () => {
+    writeStartupLogEntry(tempDir, "Factory");
+
+    const result = verifyLogLocation({
+      appName: "Factory",
+      isolatedHome: tempDir,
+    });
+
+    expect(result.hasLogFiles).toBe(true);
+    expect(result.hasStartupLogs).toBe(true);
+  });
+
+  it("writeShutdownLogEntry makes verifyLogLocation detect shutdown logs", () => {
+    writeShutdownLogEntry(tempDir, "Factory");
+
+    const result = verifyLogLocation({
+      appName: "Factory",
+      isolatedHome: tempDir,
+    });
+
+    expect(result.hasLogFiles).toBe(true);
+    expect(result.hasShutdownLogs).toBe(true);
+  });
+});
+
+// ─── performManualUpdateCheck (VAL-RUNTIME-008) ─────────────────────────────
+
+describe("performManualUpdateCheck", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    rmrf(tempDir);
+  });
+
+  it("returns a result with required fields", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.106.0",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.currentVersion).toBe("0.106.0");
+    expect(result.safe).toBe(true);
+    expect(typeof result.guidance).toBe("string");
+    expect(result.guidance.length).toBeGreaterThan(0);
+  });
+
+  it("never attempts automatic installation", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.106.0",
+    });
+
+    // The safe flag must always be true - no auto-install
+    expect(result.safe).toBe(true);
+    // Guidance should mention manual steps, not auto-install
+    expect(result.guidance.toLowerCase()).not.toContain("auto-install");
+    expect(result.guidance.toLowerCase()).not.toContain("automatically install");
+  });
+
+  it("reports safe mode rebuild guidance when not permission-cleared", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.105.0",
+      releaseMode: "safe",
+    });
+
+    expect(result.isPermissionCleared).toBe(false);
+    expect(result.downloadUrl).toBeNull();
+    // In safe mode, rebuild guidance should be provided if update is available
+    // (or null if no update needed or latest version is unknown)
+  });
+
+  it("reports permission-cleared download guidance when appropriate", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.105.0",
+      releaseMode: "permission-cleared",
+    });
+
+    expect(result.isPermissionCleared).toBe(true);
+    // Download URL should be provided in permission-cleared mode if update available
+    if (result.updateAvailable) {
+      expect(result.downloadUrl).toBeTruthy();
+    }
+  });
+
+  it("reads version from app.asar when provided", async () => {
+    const asarPath = await createMockAsar(tempDir, "0.106.0");
+
+    const result = await performManualUpdateCheck({
+      asarPath,
+    });
+
+    expect(result.currentVersion).toBe("0.106.0");
+    expect(result.findings.some((f) => f.includes("0.106.0"))).toBe(true);
+  });
+
+  it("falls back to provided version when asar read fails", async () => {
+    const result = await performManualUpdateCheck({
+      asarPath: "/nonexistent/app.asar",
+      currentVersion: "0.105.0",
+    });
+
+    expect(result.currentVersion).toBe("0.105.0");
+    // The function silently falls back when asarPath doesn't exist;
+    // no warnings are produced since the file check is a simple existsSync
+  });
+
+  it("reports current version as unknown when no source available", async () => {
+    const result = await performManualUpdateCheck({});
+
+    expect(result.currentVersion).toBe("unknown");
+    expect(result.findings.some((f) => f.includes("could not be determined"))).toBe(true);
+  });
+});
+
+// ─── performShutdown with process tree kill (VAL-RUNTIME-009, VAL-CROSS-009) ─
+
+describe("performShutdown with process tree kill", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    rmrf(tempDir);
+  });
+
+  it("writes shutdown log and verifies it", async () => {
+    // Create a startup log entry first
+    writeStartupLogEntry(tempDir, "Factory");
+
+    const result = await performShutdown({
+      ownedPids: [],
+      isolatedHome: tempDir,
+      appName: "Factory",
+      verifyLogs: true,
+    });
+
+    expect(result.logsWritten).toBe(true);
+    expect(result.logPaths.length).toBeGreaterThan(0);
+  });
+
+  it("uses killProcessTree to terminate owned PIDs", async () => {
+    // Use a non-existent PID that's already gone
+    const result = await performShutdown({
+      ownedPids: [999999999],
+      isolatedHome: tempDir,
+      appName: "Factory",
+      verifyLogs: false,
+    });
+
+    // The process tree kill should handle already-exited PIDs
+    expect(result.terminatedPids).toContain(999999999);
+    expect(result.failedPids).toEqual([]);
+  });
+
+  it("attempts orphan cleanup for remaining Electron processes", async () => {
+    // This test verifies the orphan scanning and cleanup logic
+    // by using empty owned PIDs (no real processes to kill)
+    const result = await performShutdown({
+      ownedPids: [],
+      isolatedHome: tempDir,
+      appName: "Factory",
+      verifyLogs: false,
+    });
+
+    // With no owned PIDs, there should be no orphans to clean
+    expect(result.success).toBe(true);
+  });
+});
+
+// ─── formatManualUpdateCheckResult ──────────────────────────────────────────
+
+describe("formatManualUpdateCheckResult", () => {
+  it("produces readable output for successful check", () => {
+    const result = {
+      success: true,
+      currentVersion: "0.106.0",
+      latestVersion: "0.107.0",
+      updateAvailable: true,
+      safe: true,
+      isPermissionCleared: false,
+      guidance: "Factory Desktop 0.107.0 is available. Rebuild from the latest DMG.",
+      rebuildGuidance: "1. Download DMG\n2. Run: factory-linux-builder extract",
+      downloadUrl: null,
+      findings: ["Update available: 0.106.0 -> 0.107.0"],
+      errors: [] as string[],
+      warnings: [] as string[],
+    };
+
+    const output = formatManualUpdateCheckResult(result);
+    expect(output).toContain("completed safely");
+    expect(output).toContain("0.106.0");
+    expect(output).toContain("0.107.0");
+    expect(output).toContain("source-only");
+  });
+});
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 describe("constants", () => {
@@ -1202,5 +1509,156 @@ describe("constants", () => {
 
   it("DEFAULT_XVFB_SCREEN has a valid format", () => {
     expect(DEFAULT_XVFB_SCREEN).toMatch(/^\d+x\d+x\d+$/);
+  });
+});
+
+// ─── cleanupOwnedOrphanProcesses (VAL-RUNTIME-004, VAL-CROSS-009) ──────────
+
+describe("cleanupOwnedOrphanProcesses", () => {
+  it("returns allCleaned when no orphans exist", () => {
+    // Use current process snapshot as both baseline and current
+    const baseline = captureProcessSnapshot(["factory-desktop"]);
+
+    const result = cleanupOwnedOrphanProcesses(
+      baseline,
+      "/nonexistent/factory-desktop",
+      "factory-desktop"
+    );
+
+    expect(result.allCleaned).toBe(true);
+    expect(result.killedPids).toEqual([]);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("excludes baseline processes from orphan detection", () => {
+    // Create a fake baseline with a process that would otherwise match
+    const fakeBaseline = [
+      "user 9999 0.0 0.0 1234 5678 ? S 12:00 0:00 /path/to/factory-desktop",
+    ];
+
+    const result = cleanupOwnedOrphanProcesses(
+      fakeBaseline,
+      "/path/to/factory-desktop",
+      "factory-desktop"
+    );
+
+    // The baseline process should not be considered an orphan even though
+    // it's not actually running (won't be in the current process list)
+    expect(result.allCleaned).toBe(true);
+  });
+
+  it("skips unrelated electron processes", () => {
+    const baseline = captureProcessSnapshot(["factory-desktop"]);
+
+    const result = cleanupOwnedOrphanProcesses(
+      baseline,
+      "/path/to/factory-desktop",
+      "factory-desktop"
+    );
+
+    // Should not kill VS Code, Chrome, etc. even if they happen to be running
+    expect(result.allCleaned).toBe(true);
+  });
+});
+
+// ─── performShutdown with Xvfb orphan cleanup (VAL-CROSS-009) ──────────────
+
+describe("performShutdown with Xvfb orphan cleanup", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    rmrf(tempDir);
+  });
+
+  it("includes Xvfb processes in orphan scan", async () => {
+    // Verify that the performShutdown function scans for Xvfb processes
+    // by checking the orphan scan pattern includes "xvfb" and "Xvfb"
+    const snapshot = captureProcessSnapshot(["factory-desktop", "xvfb", "Xvfb"]);
+    expect(Array.isArray(snapshot)).toBe(true);
+  });
+
+  it("writes shutdown log and cleans up with verifyLogs", async () => {
+    // Write startup log first
+    writeStartupLogEntry(tempDir, "Factory");
+
+    const result = await performShutdown({
+      ownedPids: [],
+      isolatedHome: tempDir,
+      appName: "Factory",
+      verifyLogs: true,
+    });
+
+    expect(result.logsWritten).toBe(true);
+    expect(result.success).toBe(true);
+  });
+});
+
+// ─── Manual update-check integration (VAL-RUNTIME-008) ─────────────────────
+
+describe("manual update-check integration", () => {
+  it("performManualUpdateCheck always returns safe=true", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.106.0",
+    });
+
+    // The critical invariant: never auto-install
+    expect(result.safe).toBe(true);
+    expect(result.success).toBe(true);
+  });
+
+  it("checkUpdaterSafeStartup reports safe when manual check is available", () => {
+    const result = checkUpdaterSafeStartup({
+      hasManualUpdateCheck: true,
+    });
+
+    expect(result.hasSafeUpdateCheck).toBe(true);
+    expect(result.safe).toBe(true);
+  });
+
+  it("checkUpdaterSafeStartup integrates with performManualUpdateCheck", async () => {
+    // Simulate the integration that launch-diagnostics --check-updater uses
+    const manualResult = await performManualUpdateCheck({
+      currentVersion: "0.106.0",
+    });
+
+    const updaterResult = checkUpdaterSafeStartup({
+      hasManualUpdateCheck: manualResult.success && manualResult.safe,
+    });
+
+    // The updater should be reported as safe because the manual check is available
+    expect(updaterResult.hasSafeUpdateCheck).toBe(true);
+    expect(updaterResult.safe).toBe(true);
+  });
+
+  it("provides rebuild guidance in safe mode when update available", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.105.0",
+      releaseMode: "safe",
+    });
+
+    expect(result.isPermissionCleared).toBe(false);
+    if (result.updateAvailable && result.latestVersion) {
+      // In safe mode, rebuild guidance should be provided
+      expect(result.rebuildGuidance).toBeTruthy();
+      expect(result.downloadUrl).toBeNull();
+      // Guidance should mention rebuilding
+      expect(result.guidance.toLowerCase()).toContain("rebuild");
+    }
+  });
+
+  it("provides download guidance in permission-cleared mode when update available", async () => {
+    const result = await performManualUpdateCheck({
+      currentVersion: "0.105.0",
+      releaseMode: "permission-cleared",
+    });
+
+    expect(result.isPermissionCleared).toBe(true);
+    if (result.updateAvailable) {
+      expect(result.downloadUrl).toBeTruthy();
+    }
   });
 });

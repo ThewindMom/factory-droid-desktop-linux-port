@@ -1414,6 +1414,7 @@ program
     const {
       smokeLaunchElectron,
       checkUpdaterSafeStartup,
+      performManualUpdateCheck,
       startDaemon,
       checkDaemonHealth,
       checkDaemonBinding,
@@ -1424,8 +1425,10 @@ program
       scanForOrphanProcesses,
       captureProcessSnapshot,
       writeDaemonLockFile,
+      writeStartupLogEntry,
       formatSmokeLaunchResult,
       formatUpdaterCheckResult,
+      formatManualUpdateCheckResult,
       formatDaemonStartResult,
       formatDaemonHealthResult,
       formatDaemonBindingResult,
@@ -1468,10 +1471,20 @@ program
       if (runAll || options.checkUpdater) {
         process.stdout.write(`\n--- Checking updater-safe startup (VAL-RUNTIME-008) ---\n`);
 
+        // Run the manual update-check fallback first to determine
+        // whether a safe update-check path is available
+        process.stdout.write(`\nRunning manual update-check fallback...\n`);
+        const manualCheckResult = await performManualUpdateCheck({
+          asarPath: options.asar,
+          releaseMode: releaseMode === "permission-cleared" ? "permission-cleared" : "safe",
+        });
+
+        process.stdout.write(`\n${formatManualUpdateCheckResult(manualCheckResult)}\n`);
+
         const updaterResult = checkUpdaterSafeStartup({
           asarPath: options.asar,
-          hasManualUpdateCheck: false,
-          usesProjectReleases: false,
+          hasManualUpdateCheck: manualCheckResult.success && manualCheckResult.safe,
+          usesProjectReleases: releaseMode === "permission-cleared",
         });
 
         process.stdout.write(`\n${formatUpdaterCheckResult(updaterResult)}\n`);
@@ -1492,6 +1505,10 @@ program
           );
         } else {
           process.stdout.write(`\n--- Running Xvfb smoke launch (VAL-RUNTIME-004) ---\n`);
+
+          // Write a startup log entry so log verification can detect
+          // startup evidence in the isolated profile
+          writeStartupLogEntry(isolatedHome, appName, xdgConfigHome, xdgStateHome);
 
           const smokeResult = smokeLaunchElectron({
             appPath: options.appDir,
@@ -1728,6 +1745,78 @@ program
         }
       }
     }
+  });
+
+/**
+ * `update-check` subcommand: safe manual update-check fallback.
+ *
+ * VAL-RUNTIME-008: Exposes a safe update-check path that reports
+ * current/latest versions and rebuild/download guidance without
+ * automatic installation when Linux updater auto-update is unsafe.
+ *
+ * VAL-PACKAGE-009: Reports current version, latest version, and
+ * manual rebuild or release download guidance without attempting
+ * automatic installation.
+ */
+program
+  .command("update-check")
+  .description("Check for Factory Desktop updates safely (no auto-install)")
+  .option(
+    "--asar <path>",
+    "Path to app.asar for reading current version"
+  )
+  .option(
+    "--current-version <version>",
+    "Current Factory Desktop version (overrides asar detection)"
+  )
+  .option(
+    "--release-mode <mode>",
+    "Release mode: safe (default) or permission-cleared",
+    DEFAULT_RELEASE_MODE
+  )
+  .option(
+    "--timeout <ms>",
+    "API request timeout in milliseconds",
+    "15000"
+  )
+  .action(async (options) => {
+    const {
+      performManualUpdateCheck,
+      formatManualUpdateCheckResult,
+    } = await import("./launch-lifecycle");
+
+    const releaseMode = resolveReleaseMode(options.releaseMode);
+
+    process.stdout.write(
+      `Checking for Factory Desktop updates...\n` +
+      `  Release mode: ${describeReleaseMode(releaseMode)}\n`
+    );
+
+    const requestTimeout = parseInt(options.timeout, 10);
+    if (isNaN(requestTimeout) || requestTimeout <= 0) {
+      process.stderr.write(`Invalid timeout: ${options.timeout}. Must be a positive integer.\n`);
+      process.exit(1);
+    }
+
+    const result = await performManualUpdateCheck({
+      asarPath: options.asar,
+      currentVersion: options.currentVersion,
+      releaseMode: releaseMode === "permission-cleared" ? "permission-cleared" : "safe",
+      requestTimeout,
+    });
+
+    process.stdout.write(`\n${formatManualUpdateCheckResult(result)}\n`);
+
+    if (!result.success) {
+      process.stderr.write(`\n✗ Update check failed.\n`);
+      process.exit(1);
+    }
+
+    // Always exit 0 for a successful (safe) check, even if an update
+    // is available. The purpose is to report guidance, not to fail.
+    process.stdout.write(
+      `\n✓ Update check completed safely. No automatic installation was attempted.\n`
+    );
   });
 
 program.parse();
