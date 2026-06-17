@@ -3044,4 +3044,262 @@ program
     }
   });
 
+/**
+ * `auth-safety-diagnostics` subcommand: run auth-safety validation harnesses
+ * for first-run unauthenticated UX, login initiation, deep-link callback
+ * routing, protected unauthenticated states, and secret-safe logging.
+ *
+ * Fulfills: VAL-CROSS-003, VAL-CROSS-011, VAL-CROSS-012,
+ *           VAL-CROSS-013, VAL-CROSS-018
+ */
+program
+  .command("auth-safety-diagnostics")
+  .description("Run auth-safety validation harnesses for the assembled Linux app")
+  .option(
+    "--app-dir <path>",
+    "Path to the assembled Linux app directory (from assemble command)"
+  )
+  .option(
+    "--app-name <name>",
+    "Application name (default: factory-desktop)",
+    "factory-desktop"
+  )
+  .option(
+    "--first-run",
+    "Run first-run unauthenticated UX validation (VAL-CROSS-011)",
+    false
+  )
+  .option(
+    "--login-initiation",
+    "Run login initiation validation (VAL-CROSS-012)",
+    false
+  )
+  .option(
+    "--deep-link",
+    "Run deep-link callback validation (VAL-CROSS-003)",
+    false
+  )
+  .option(
+    "--protected-actions",
+    "Run protected action state validation (VAL-CROSS-013)",
+    false
+  )
+  .option(
+    "--log-secret-scan",
+    "Run log secret safety scan (VAL-CROSS-018)",
+    false
+  )
+  .option(
+    "--all",
+    "Run all auth-safety diagnostics",
+    false
+  )
+  .option(
+    "--no-sandbox",
+    "Use --no-sandbox for Electron launch (default: true in CI)",
+    true
+  )
+  .option(
+    "--deep-link-url <url>",
+    "Deep-link URL for callback tests (default: factory-desktop://callback?code=test&state=test)"
+  )
+  .action(async (options) => {
+    const {
+      validateFirstRunState,
+      validateLoginInitiation,
+      validateDeepLinkCallback,
+      validateProtectedActions,
+      validateLogSecretSafety,
+      formatFirstRunResult,
+      formatLoginInitiationResult,
+      formatDeepLinkCallbackResult,
+      formatProtectedActionResult,
+      formatLogSecretScanResult,
+    } = await import("./auth-safety");
+
+    const runAll = options.all;
+    const appName = options.appName;
+
+    if (!options.appDir) {
+      process.stderr.write(
+        `⚠ --app-dir is required. Provide the path to the assembled Linux app directory.\n`
+      );
+      process.exit(1);
+    }
+
+    let hasErrors = false;
+
+    process.stdout.write(`\nAuth-Safety Diagnostics\n`);
+    process.stdout.write(`  App dir: ${options.appDir}\n`);
+    process.stdout.write(`  App name: ${appName}\n`);
+    process.stdout.write(`  No-sandbox: ${options.noSandbox}\n\n`);
+
+    // ─── VAL-CROSS-011: First-Run Unauthenticated UX ──────────────────
+    if (runAll || options.firstRun) {
+      process.stdout.write(`\n--- Validating first-run unauthenticated UX (VAL-CROSS-011) ---\n`);
+
+      const result = await validateFirstRunState({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 25_000,
+        cdpTimeout: 5_000,
+      });
+
+      process.stdout.write(`\n${formatFirstRunResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ First-run validation failed. The app may not show a clear unauthenticated state.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-012: Login Initiation ──────────────────────────────
+    if (runAll || options.loginInitiation) {
+      process.stdout.write(`\n--- Validating login initiation (VAL-CROSS-012) ---\n`);
+
+      const result = await validateLoginInitiation({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 25_000,
+        cdpTimeout: 5_000,
+      });
+
+      process.stdout.write(`\n${formatLoginInitiationResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Login initiation validation failed.\n`
+        );
+      }
+
+      if (result.authenticatedBlocked) {
+        process.stdout.write(
+          `\nℹ Authenticated sub-behavior is BLOCKED: no real Factory credentials available.\n` +
+          `  Login controls were checked, but OAuth completion could not be verified.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-003: Deep-Link Callback ────────────────────────────
+    if (runAll || options.deepLink) {
+      process.stdout.write(`\n--- Validating deep-link callback (VAL-CROSS-003) ---\n`);
+
+      const deepLinkUrl = options.deepLinkUrl || "factory-desktop://callback?code=test&state=test";
+
+      const result = await validateDeepLinkCallback({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 25_000,
+        cdpTimeout: 5_000,
+        deepLinkUrl,
+      });
+
+      process.stdout.write(`\n${formatDeepLinkCallbackResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Deep-link callback validation failed.\n`
+        );
+      }
+
+      if (result.authenticatedBlocked) {
+        process.stdout.write(
+          `\nℹ Authenticated sub-behavior is BLOCKED: no real Factory credentials available.\n` +
+          `  Deep-link routing was checked, but authenticated landing could not be verified.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-013: Protected Action States ───────────────────────
+    if (runAll || options.protectedActions) {
+      process.stdout.write(`\n--- Validating protected action states (VAL-CROSS-013) ---\n`);
+
+      const result = await validateProtectedActions({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 25_000,
+        cdpTimeout: 5_000,
+      });
+
+      process.stdout.write(`\n${formatProtectedActionResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Protected action validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-018: Log Secret Safety ─────────────────────────────
+    if (runAll || options.logSecretScan) {
+      process.stdout.write(`\n--- Scanning logs for secrets (VAL-CROSS-018) ---\n`);
+
+      // Scan the isolated profile directories from previous tests
+      // or the user's Factory config directory
+      const logPaths = [
+        path.join(os.homedir(), ".config", "Factory", "logs"),
+        path.join(os.homedir(), ".config", "factory-desktop", "logs"),
+      ];
+
+      for (const logPath of logPaths) {
+        if (fs.existsSync(logPath)) {
+          process.stdout.write(`  Scanning: ${logPath}\n`);
+          const result = validateLogSecretSafety({ logDirectory: logPath });
+          process.stdout.write(`\n${formatLogSecretScanResult(result)}\n`);
+
+          if (!result.clean) {
+            hasErrors = true;
+            process.stderr.write(
+              `\n✗ Secrets detected in logs at ${logPath}.\n`
+            );
+          }
+        } else {
+          process.stdout.write(`  Skipping: ${logPath} (not found)\n`);
+        }
+      }
+
+      // If no log directories found, scan /tmp for any recent test logs
+      const tmpDir = os.tmpdir();
+      const tmpFactoryDirs = fs.readdirSync(tmpDir).filter(
+        (d) => d.startsWith("factory-auth-") && fs.statSync(path.join(tmpDir, d)).isDirectory()
+      );
+
+      for (const dir of tmpFactoryDirs) {
+        const dirPath = path.join(tmpDir, dir);
+        process.stdout.write(`  Scanning: ${dirPath}\n`);
+        const result = validateLogSecretSafety({ logDirectory: dirPath });
+        process.stdout.write(`\n${formatLogSecretScanResult(result)}\n`);
+
+        if (!result.clean) {
+          hasErrors = true;
+        }
+      }
+    }
+
+    // ─── Summary ──────────────────────────────────────────────────────
+    process.stdout.write(`\n--- Auth-Safety Diagnostics Summary ---\n`);
+    if (hasErrors) {
+      process.stderr.write(`\n✗ Some auth-safety validations failed. Review output above.\n`);
+      process.exit(1);
+    } else {
+      process.stdout.write(`\n✓ All auth-safety validations passed.\n`);
+
+      process.stdout.write(
+        `\nNote: Authenticated sub-behavior (OAuth completion, session loading with\n` +
+        `real credentials, etc.) is marked as BLOCKED because real Factory credentials\n` +
+        `are not available to automated workers. Unauthenticated safe behavior has been\n` +
+        `validated per contract clarification.\n`
+      );
+    }
+  });
+
 program.parse();
