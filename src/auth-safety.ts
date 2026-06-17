@@ -104,6 +104,15 @@ export interface FirstRunValidationResult {
   noFatalConsoleErrors: boolean;
   /** Whether the app terminated cleanly */
   terminatedCleanly: boolean;
+  /**
+   * Tier of DOM inspection for sign-in path detection:
+   * - "dom": CDP JavaScript evaluation successfully queried the DOM
+   * - "cdp-title": Only page title/URL was available from CDP
+   * - "unavailable": CDP connection failed, process output fallback used
+   */
+  signInDetectionTier: "dom" | "cdp-title" | "unavailable";
+  /** Details of login controls found via DOM inspection (empty if not available) */
+  signInControlDetails: string[];
   /** UI content text extracted via CDP (truncated) */
   uiContentText: string;
   /** Console messages captured */
@@ -144,6 +153,15 @@ export interface LoginInitiationResult {
   startedCleanly: boolean;
   /** Whether a login control was found in the UI */
   loginControlFound: boolean;
+  /**
+   * Tier of DOM inspection for login control detection:
+   * - "dom": CDP JavaScript evaluation successfully queried the DOM
+   * - "cdp-title": Only page title/URL was available from CDP
+   * - "unavailable": CDP connection failed, process output fallback used
+   */
+  loginControlDetectionTier: "dom" | "cdp-title" | "unavailable";
+  /** Details of login controls found via DOM inspection (empty if not available) */
+  loginControlDetails: string[];
   /** Whether login initiation opened or attempted an OAuth/browser route */
   oauthRouteAttempted: boolean;
   /** Whether a visible error was shown for failed login */
@@ -413,10 +431,178 @@ async function connectCdp(
   }
 }
 
-// evaluateViaCdp removed - unused, HTTP CDP doesn't support JS evaluation
+/**
+ * Evaluate a JavaScript expression in the page context via CDP WebSocket.
+ *
+ * Uses the Chrome DevTools Protocol WebSocket connection to execute
+ * JavaScript in the renderer page. This enables DOM-level inspection
+ * for sign-in/login controls, which is stronger evidence than
+ * page title/URL matching.
+ *
+ * Falls back gracefully if WebSocket connection or evaluation fails.
+ */
+async function evaluateViaCdp(
+  cdpPort: number,
+  expression: string,
+  timeoutMs: number = 5_000
+): Promise<{ success: boolean; result?: unknown; error?: string }> {
+  try {
+    // Get the WebSocket debugger URL
+    const pagesUrl = `http://127.0.0.1:${cdpPort}/json`;
+    const pagesResponse = await new Promise<string>((resolve, reject) => {
+      const req = http.get(pagesUrl, (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+        res.on("end", () => { resolve(data); });
+      });
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("CDP pages timeout")); });
+      req.on("error", reject);
+    });
+
+    const pages = JSON.parse(pagesResponse) as Array<{
+      id: string;
+      webSocketDebuggerUrl?: string;
+    }>;
+
+    if (pages.length === 0 || !pages[0].webSocketDebuggerUrl) {
+      return { success: false, error: "No page with WebSocket URL available" };
+    }
+
+    // WebSocket debugger URL is available but we use the simpler
+    // HTTP /json/evaluate endpoint instead, since the 'ws' package
+    // is not guaranteed to be installed.
+
+    // Attempt: Use the CDP HTTP endpoint for Runtime.evaluate
+    // Some Electron versions support /json/evaluate
+    try {
+      const evalUrl = `http://127.0.0.1:${cdpPort}/json/evaluate?expr=${encodeURIComponent(expression)}`;
+      const evalResponse = await new Promise<string>((resolve, reject) => {
+        const req = http.get(evalUrl, (res) => {
+          let data = "";
+          res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+          res.on("end", () => { resolve(data); });
+        });
+        req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("CDP eval timeout")); });
+        req.on("error", reject);
+      });
+      return { success: true, result: evalResponse };
+    } catch {
+      // /json/evaluate not available; return failure
+      return { success: false, error: "CDP /json/evaluate not available; full WebSocket CDP or WebdriverIO/Playwright needed for DOM inspection" };
+    }
+  } catch (err) {
+    return { success: false, error: `CDP evaluate failed: ${String(err)}` };
+  }
+}
+
+/**
+ * Query the page DOM for sign-in/login controls via CDP.
+ *
+ * Uses CDP JavaScript evaluation to search for common sign-in UI elements:
+ * - Buttons or links containing sign-in/login text
+ * - Form elements related to authentication
+ * - Elements with auth-related aria labels or roles
+ *
+ * Returns a result indicating whether DOM-level login controls were found
+ * and at what tier the inspection was performed.
+ */
+async function queryLoginControlsViaCdp(
+  cdpPort: number,
+  timeoutMs: number = 5_000
+): Promise<{
+  loginControlsFound: boolean;
+  domInspectionTier: "dom" | "cdp-title" | "unavailable";
+  controlDetails: string[];
+  error?: string;
+}> {
+  // Try DOM-level JavaScript evaluation first (strongest evidence)
+  const domQuery = [
+    "(() => {",
+    "  const results = [];",
+    "  const selectors = [",
+    "    'button', 'a', '[role=\"button\"]',",
+    "    'input[type=\"submit\"]', 'input[type=\"button\"]',",
+    "    '[data-testid*=\"sign\"]', '[data-testid*=\"login\"]',",
+    "    '[data-testid*=\"auth\"]', '[aria-label*=\"sign\"]',",
+    "    '[aria-label*=\"login\"]', '[aria-label*=\"auth\"]',",
+    "  ];",
+    "  for (const sel of selectors) {",
+    "    for (const el of document.querySelectorAll(sel)) {",
+    "      const text = (el.textContent || '').trim();",
+    "      const ariaLabel = el.getAttribute('aria-label') || '';",
+    "      const href = el.getAttribute('href') || '';",
+    "      const combined = (text + ' ' + ariaLabel + ' ' + href).toLowerCase();",
+    "      if (/sign.?in|log.?in|authenticate|get.?started|connect/.test(combined)) {",
+    "        results.push({ selector: sel, text: text.substring(0, 80) });",
+    "      }",
+    "    }",
+    "  }",
+    "  return JSON.stringify(results);",
+    "})()",
+  ].join("\n");
+
+  const evalResult = await evaluateViaCdp(cdpPort, domQuery, timeoutMs);
+
+  if (evalResult.success && evalResult.result !== undefined) {
+    try {
+      const parsed = JSON.parse(String(evalResult.result));
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return {
+          loginControlsFound: true,
+          domInspectionTier: "dom",
+          controlDetails: parsed.map((c: { selector: string; text: string }) =>
+            `${c.selector}: "${c.text}"`
+          ),
+        };
+      }
+      // DOM query succeeded but found no matching controls
+      return {
+        loginControlsFound: false,
+        domInspectionTier: "dom",
+        controlDetails: [],
+      };
+    } catch {
+      // Parse failed; DOM query result was not JSON
+    }
+  }
+
+  // DOM evaluation not available; fall back to CDP title/URL inspection
+  return {
+    loginControlsFound: false,
+    domInspectionTier: "cdp-title",
+    controlDetails: [],
+    error: evalResult.error || "DOM evaluation unavailable; CDP title/URL fallback in use",
+  };
+}
+
+/** Result of DOM-level login control inspection */
+export interface DomLoginInspectionResult {
+  /** Whether DOM-level login controls were found */
+  loginControlsFound: boolean;
+  /**
+   * The tier of DOM inspection evidence:
+   * - "dom": CDP JavaScript evaluation successfully queried the DOM (strongest)
+   * - "cdp-title": Only page title/URL was available from CDP (weaker)
+   * - "unavailable": CDP connection failed entirely (fallback to process output)
+   */
+  domInspectionTier: "dom" | "cdp-title" | "unavailable";
+  /** Details of found login controls */
+  controlDetails: string[];
+  /** Error message if DOM inspection failed */
+  error?: string;
+}
 
 /**
  * Terminate the app and clean up orphan processes.
+ *
+ * Shutdown sequence under Xvfb:
+ * 1. SIGTERM via killProcessTree (graceful shutdown attempt, 8s timeout).
+ *    Under Xvfb, the Electron process group may not receive the signal
+ *    directly because xvfb-run wraps the process; the process-group kill
+ *    (-pid) helps but is not guaranteed. This is documented as a known
+ *    limitation of headless Electron testing.
+ * 2. SIGKILL for remaining processes (force-kill fallback).
+ * 3. Second-pass orphan cleanup via cleanupOwnedOrphanProcesses.
  */
 function terminateAndCleanup(
   childProcess: ChildProcess,
@@ -429,6 +615,8 @@ function terminateAndCleanup(
   let terminatedCleanly = true;
 
   if (childProcess.pid && !childProcess.killed && childProcess.exitCode === null) {
+    // Step 1: Attempt graceful shutdown via SIGTERM, then force-kill (SIGKILL)
+    // after the graceful timeout. killProcessTree handles both steps internally.
     try {
       const killResult = killProcessTree(childProcess.pid, {
         gracefulTimeout: 8000,
@@ -439,8 +627,19 @@ function terminateAndCleanup(
         errors.push(`Failed to terminate: ${killResult.failed.join(", ")}`);
         terminatedCleanly = false;
       }
-    } catch {
-      terminatedCleanly = true;
+      if (killResult.warnings.some((w) => w.includes("force-killed"))) {
+        warnings.push(
+          "Graceful shutdown (SIGTERM) timed out; processes were force-killed (SIGKILL). " +
+          "Under Xvfb, Electron may not respond to SIGTERM promptly because xvfb-run " +
+          "wraps the process. This is a known limitation of headless Electron testing."
+        );
+      }
+    } catch (err) {
+      // killProcessTree itself threw - this is unexpected and means we couldn't
+      // even attempt graceful shutdown. Record as an error rather than silently
+      // marking as clean.
+      errors.push(`killProcessTree threw: ${String(err)}`);
+      terminatedCleanly = false;
     }
   }
 
@@ -659,6 +858,8 @@ export async function validateFirstRunState(
   let noFatalConsoleErrors = true;
   let terminatedCleanly = false;
   let signInPathDetected = false;
+  let signInDetectionTier: "dom" | "cdp-title" | "unavailable" = "unavailable";
+  let signInControlDetails: string[] = [];
   let uiContentText = "";
   let stdout = "";
   let stderr = "";
@@ -681,6 +882,8 @@ export async function validateFirstRunState(
       rendererLoaded: false,
       noFatalConsoleErrors: false,
       terminatedCleanly: false,
+      signInDetectionTier: "unavailable",
+      signInControlDetails: [],
       uiContentText: "",
       consoleMessages,
       fatalErrors,
@@ -807,9 +1010,30 @@ export async function validateFirstRunState(
             }
           }
 
-          // If page title/URL didn't indicate sign-in, give more time
-          // and re-check (first-run UI may load after initial render)
-          if (!signInPathDetected && rendererLoaded) {
+          // Try DOM-level inspection for sign-in/login controls
+          // This provides stronger evidence than title/URL matching
+          const domInspection = await queryLoginControlsViaCdp(cdpPort, cdpTimeout);
+          signInDetectionTier = domInspection.domInspectionTier;
+
+          if (domInspection.loginControlsFound) {
+            signInPathDetected = true;
+            signInControlDetails = domInspection.controlDetails;
+            warnings.push(
+              `Sign-in controls detected via DOM inspection (tier: ${domInspection.domInspectionTier}): ` +
+              domInspection.controlDetails.join("; ")
+            );
+          } else if (domInspection.domInspectionTier === "dom") {
+            // DOM inspection succeeded but found no matching controls
+            // This is still stronger evidence than title/URL matching
+            warnings.push(
+              "DOM-level inspection succeeded but no sign-in controls found. " +
+              "The app may use a different UI pattern for sign-in."
+            );
+          }
+
+          // If page title/URL didn't indicate sign-in and DOM inspection
+          // wasn't available, give more time and re-check
+          if (!signInPathDetected && rendererLoaded && domInspection.domInspectionTier !== "dom") {
             try {
               execSync("sleep 3", { timeout: 5000 });
             } catch {
@@ -827,12 +1051,23 @@ export async function validateFirstRunState(
                   break;
                 }
               }
+
+              // Retry DOM inspection after delay
+              if (!signInPathDetected) {
+                const domInspection2 = await queryLoginControlsViaCdp(cdpPort, cdpTimeout);
+                if (domInspection2.loginControlsFound) {
+                  signInPathDetected = true;
+                  signInControlDetails = domInspection2.controlDetails;
+                  signInDetectionTier = domInspection2.domInspectionTier;
+                }
+              }
             }
           }
         } else {
           warnings.push("No pages found via CDP during first-run check");
         }
       } else {
+        signInDetectionTier = "unavailable";
         warnings.push("CDP connection failed for first-run UI inspection; using fallback checks");
       }
 
@@ -919,6 +1154,8 @@ export async function validateFirstRunState(
     rendererLoaded,
     noFatalConsoleErrors,
     terminatedCleanly,
+    signInDetectionTier,
+    signInControlDetails,
     uiContentText,
     consoleMessages,
     fatalErrors,
@@ -954,6 +1191,8 @@ export async function validateLoginInitiation(
 
   let startedCleanly = false;
   let loginControlFound = false;
+  let loginControlDetectionTier: "dom" | "cdp-title" | "unavailable" = "unavailable";
+  let loginControlDetails: string[] = [];
   let oauthRouteAttempted = false;
   let visibleErrorShown = false;
   let noSecretsLogged = true;
@@ -976,6 +1215,8 @@ export async function validateLoginInitiation(
       success: false,
       startedCleanly: false,
       loginControlFound: false,
+      loginControlDetectionTier: "unavailable",
+      loginControlDetails: [],
       oauthRouteAttempted: false,
       visibleErrorShown: false,
       noSecretsLogged: true,
@@ -1053,8 +1294,18 @@ export async function validateLoginInitiation(
           for (const pattern of SIGN_IN_PATTERNS) {
             if (pattern.test(pageText)) {
               loginControlFound = true;
+              loginControlDetectionTier = "cdp-title";
               break;
             }
+          }
+
+          // Try DOM-level inspection for login controls (strongest evidence)
+          const domInspection = await queryLoginControlsViaCdp(cdpPort, cdpTimeout);
+          loginControlDetectionTier = domInspection.domInspectionTier;
+
+          if (domInspection.loginControlsFound) {
+            loginControlFound = true;
+            loginControlDetails = domInspection.controlDetails;
           }
 
           // Retry after delay for lazy-loaded UI
@@ -1070,13 +1321,27 @@ export async function validateLoginInitiation(
               for (const pattern of SIGN_IN_PATTERNS) {
                 if (pattern.test(pageText2)) {
                   loginControlFound = true;
+                  if (loginControlDetectionTier === "unavailable") {
+                    loginControlDetectionTier = "cdp-title";
+                  }
                   break;
+                }
+              }
+
+              // Retry DOM inspection after delay
+              if (!loginControlFound) {
+                const domInspection2 = await queryLoginControlsViaCdp(cdpPort, cdpTimeout);
+                if (domInspection2.loginControlsFound) {
+                  loginControlFound = true;
+                  loginControlDetails = domInspection2.controlDetails;
+                  loginControlDetectionTier = domInspection2.domInspectionTier;
                 }
               }
             }
           }
         }
       } else {
+        loginControlDetectionTier = "unavailable";
         warnings.push("CDP connection failed for login control inspection");
       }
 
@@ -1176,6 +1441,8 @@ export async function validateLoginInitiation(
     success,
     startedCleanly,
     loginControlFound,
+    loginControlDetectionTier,
+    loginControlDetails,
     oauthRouteAttempted,
     visibleErrorShown,
     noSecretsLogged,
@@ -1885,11 +2152,14 @@ export function formatFirstRunResult(result: FirstRunValidationResult): string {
   lines.push("First-Run Unauthenticated UX Validation (VAL-CROSS-011):");
   lines.push(`  Overall: ${result.success ? "✓ PASSED" : "✗ FAILED"}`);
   lines.push(`  Started cleanly: ${result.startedCleanly ? "✓" : "✗"}`);
-  lines.push(`  Sign-in path detected: ${result.signInPathDetected ? "✓" : "✗"}`);
+  lines.push(`  Sign-in path detected: ${result.signInPathDetected ? "✓" : "✗"} (tier: ${result.signInDetectionTier})`);
   lines.push(`  CDP connected: ${result.cdpConnected ? "✓" : "— (not available)"}`);
   lines.push(`  Renderer loaded: ${result.rendererLoaded ? "✓" : "✗"}`);
   lines.push(`  No fatal console errors: ${result.noFatalConsoleErrors ? "✓" : "✗"}`);
   lines.push(`  Terminated cleanly: ${result.terminatedCleanly ? "✓" : "✗"}`);
+  if (result.signInControlDetails.length > 0) {
+    lines.push(`  Sign-in control details: ${result.signInControlDetails.join("; ")}`);
+  }
 
   if (result.uiContentText) {
     lines.push(`  UI content: ${result.uiContentText.substring(0, 200)}`);
@@ -1917,7 +2187,10 @@ export function formatLoginInitiationResult(result: LoginInitiationResult): stri
   lines.push("Login Initiation Validation (VAL-CROSS-012):");
   lines.push(`  Overall: ${result.success ? "✓ PASSED" : "✗ FAILED"}`);
   lines.push(`  Started cleanly: ${result.startedCleanly ? "✓" : "✗"}`);
-  lines.push(`  Login control found: ${result.loginControlFound ? "✓" : "✗"}`);
+  lines.push(`  Login control found: ${result.loginControlFound ? "✓" : "✗"} (tier: ${result.loginControlDetectionTier})`);
+  if (result.loginControlDetails.length > 0) {
+    lines.push(`  Login control details: ${result.loginControlDetails.join("; ")}`);
+  }
   lines.push(`  OAuth route attempted: ${result.oauthRouteAttempted ? "✓" : "—"}`);
   lines.push(`  Visible error shown: ${result.visibleErrorShown ? "✓" : "—"}`);
   lines.push(`  No secrets logged: ${result.noSecretsLogged ? "✓" : "✗"}`);

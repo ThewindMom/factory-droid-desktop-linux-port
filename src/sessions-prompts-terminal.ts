@@ -72,7 +72,13 @@ const PROMPT_ERROR_PATTERNS = [
   /interrupt/i,
   /stream[\s_-]?(interrupted|stopped|error)/i,
 ];
-void PROMPT_ERROR_PATTERNS;/** Patterns that indicate file browser/workspace UI is present */
+// Intentionally void: PROMPT_ERROR_PATTERNS is kept as a shared reference and
+// documentation of the general error-signal vocabulary. Per-state inline
+// patterns in validatePromptErrors() are more specific. Voided here to
+// satisfy noUnusedLocals until a consumer references it directly.
+void PROMPT_ERROR_PATTERNS;
+
+/** Patterns that indicate file browser/workspace UI is present */
 const FILE_BROWSER_PATTERNS = [
   /open[\s_-]?folder/i,
   /browse/i,
@@ -330,6 +336,14 @@ export interface FileBrowsingResult {
   fileBrowserUiDetected: boolean;
   /** Whether Linux workspace directory was opened */
   workspaceOpened: boolean;
+  /**
+   * Confirmation tier for workspaceOpened evidence:
+   * - "cdp":         Workspace path or file browser UI confirmed via CDP
+   * - "process":     Workspace path or Linux paths found in process output
+   * - "survival":    App started without crash (weakest; no direct workspace evidence)
+   * - "inferred":    No positive or negative evidence
+   */
+  workspaceOpenedTier: ConfirmationTier;
   /** Whether no macOS path assumptions prevented browsing */
   noMacPathFailures: boolean;
   /**
@@ -575,6 +589,14 @@ export interface WorkspacePickerResult {
   pickerUiDetected: boolean;
   /** Whether Linux workspace directory was opened */
   workspaceOpened: boolean;
+  /**
+   * Confirmation tier for workspaceOpened evidence:
+   * - "cdp":         Workspace path confirmed via CDP page content
+   * - "process":     Workspace path or Linux paths found in process output
+   * - "survival":    App started without crash (weakest; no direct workspace evidence)
+   * - "inferred":    No positive or negative evidence
+   */
+  workspaceOpenedTier: ConfirmationTier;
   /** Whether UI transitioned to workspace context */
   uiTransitionedToWorkspace: boolean;
   /** Whether no macOS path issues */
@@ -799,6 +821,15 @@ async function connectCdp(
 
 /**
  * Terminate the app and clean up orphan processes.
+ *
+ * Shutdown sequence under Xvfb:
+ * 1. SIGTERM via killProcessTree (graceful shutdown attempt, 8s timeout).
+ *    Under Xvfb, the Electron process group may not receive the signal
+ *    directly because xvfb-run wraps the process; the process-group kill
+ *    (-pid) helps but is not guaranteed. This is documented as a known
+ *    limitation of headless Electron testing.
+ * 2. SIGKILL for remaining processes (force-kill fallback).
+ * 3. Second-pass orphan cleanup via cleanupOwnedOrphanProcesses.
  */
 function terminateAndCleanup(
   childProcess: ChildProcess,
@@ -811,6 +842,8 @@ function terminateAndCleanup(
   let terminatedCleanly = true;
 
   if (childProcess.pid && !childProcess.killed && childProcess.exitCode === null) {
+    // Step 1: Attempt graceful shutdown via SIGTERM, then force-kill (SIGKILL)
+    // after the graceful timeout. killProcessTree handles both steps internally.
     try {
       const killResult = killProcessTree(childProcess.pid, {
         gracefulTimeout: 8000,
@@ -821,8 +854,19 @@ function terminateAndCleanup(
         errors.push(`Failed to terminate: ${killResult.failed.join(", ")}`);
         terminatedCleanly = false;
       }
-    } catch {
-      terminatedCleanly = true;
+      if (killResult.warnings.some((w) => w.includes("force-killed"))) {
+        warnings.push(
+          "Graceful shutdown (SIGTERM) timed out; processes were force-killed (SIGKILL). " +
+          "Under Xvfb, Electron may not respond to SIGTERM promptly because xvfb-run " +
+          "wraps the process. This is a known limitation of headless Electron testing."
+        );
+      }
+    } catch (err) {
+      // killProcessTree itself threw - this is unexpected and means we couldn't
+      // even attempt graceful shutdown. Record as an error rather than silently
+      // marking as clean.
+      errors.push(`killProcessTree threw: ${String(err)}`);
+      terminatedCleanly = false;
     }
   }
 
@@ -1151,7 +1195,7 @@ export async function validateSessionLoading(
   //   (survival = app didn't crash, but we couldn't confirm session UI)
   const sessionEvidence = sessionUiDetected || rendererLoaded;
   const success = startedCleanly && noSessionCrashes && noLinuxPathFailures &&
-    (sessionEvidence || startedCleanly /* survival-tier fallback */);
+    (sessionEvidence || startedCleanly /* survival-tier fallback: weak evidence, see confirmationTier */);
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
     cdpDetected: sessionUiDetected && cdpConnected,
@@ -1333,7 +1377,7 @@ export async function validatePromptSubmission(
   // or survival-tier fallback), no secrets, clean termination.
   const promptEvidence = unauthenticatedBlockedSafely || promptInputDetected;
   const success = startedCleanly && noPromptCrashes &&
-    (promptEvidence || startedCleanly /* survival-tier fallback */) &&
+    (promptEvidence || startedCleanly /* survival-tier fallback: weak evidence, see confirmationTier */) &&
     noSecretsLogged && terminatedCleanly;
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
@@ -1376,6 +1420,7 @@ export async function validateFileBrowsing(
   let fileBrowserUiDetectedViaProcess = false;
   let workspaceOpened = false;
   let workspaceDirectEvidence = false;
+  let workspaceOpenedTier: ConfirmationTier = "inferred";
   let noMacPathFailures = true;
   // permissionDeniedHandled: we cannot interact with the UI to browse the
   // no-access directory, so this starts as inferred. If we find explicit
@@ -1414,7 +1459,8 @@ export async function validateFileBrowsing(
     cleanupTestWorkspace(testWorkspacePath);
     return {
       success: false, startedCleanly: false, fileBrowserUiDetected: false,
-      workspaceOpened: false, noMacPathFailures: false, permissionDeniedHandled: false,
+      workspaceOpened: false, workspaceOpenedTier: "inferred",
+      noMacPathFailures: false, permissionDeniedHandled: false,
       permissionDeniedTier: "inferred", confirmationTier: "inferred",
       cdpConnected: false, terminatedCleanly: false, testWorkspacePath,
       uiContentText: "", consoleMessages, stdout: "", stderr: "",
@@ -1470,7 +1516,10 @@ export async function validateFileBrowsing(
         matchesAnyPattern(allOutput, LINUX_PATH_PATTERNS) ||
         allOutput.includes(testWorkspacePath) ||
         fileBrowserUiDetected;
-      workspaceOpened = workspaceDirectEvidence || startedCleanly; // Tier 3 fallback
+      workspaceOpened = workspaceDirectEvidence || startedCleanly; // survival-tier fallback when no direct evidence
+      workspaceOpenedTier = workspaceDirectEvidence
+        ? (fileBrowserUiDetected && cdpConnected && !fileBrowserUiDetectedViaProcess ? "cdp" : "process")
+        : (startedCleanly ? "survival" : "inferred");
 
       // Check for macOS path assumption failures
       if (matchesAnyPattern(allOutput, MACOS_PATH_ERROR_PATTERNS)) {
@@ -1527,7 +1576,7 @@ export async function validateFileBrowsing(
 
   const fileEvidence = workspaceDirectEvidence || fileBrowserUiDetected;
   const success = startedCleanly && noMacPathFailures && terminatedCleanly &&
-    (fileEvidence || startedCleanly /* survival-tier fallback */);
+    (fileEvidence || startedCleanly /* survival-tier fallback: explicit annotation */);
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
     cdpDetected: fileBrowserUiDetected && cdpConnected && !fileBrowserUiDetectedViaProcess,
@@ -1542,6 +1591,14 @@ export async function validateFileBrowsing(
     );
   }
 
+  if (workspaceOpenedTier === "survival") {
+    warnings.push(
+      "workspaceOpened confirmed only at survival-tier (app didn't crash, but no " +
+      "direct workspace evidence found). workspaceOpenedTier field provides explicit " +
+      "confirmation level for this result."
+    );
+  }
+
   if (permissionDeniedTier === "inferred") {
     warnings.push(
       "Permission-denied handling is inferred (not directly observed). " +
@@ -1550,7 +1607,7 @@ export async function validateFileBrowsing(
   }
 
   return {
-    success, startedCleanly, fileBrowserUiDetected, workspaceOpened,
+    success, startedCleanly, fileBrowserUiDetected, workspaceOpened, workspaceOpenedTier,
     noMacPathFailures, permissionDeniedHandled, permissionDeniedTier,
     confirmationTier, cdpConnected, terminatedCleanly,
     testWorkspacePath, uiContentText, consoleMessages, stdout, stderr,
@@ -1682,7 +1739,7 @@ export async function validateTerminalFlow(
       // Since we can't interact with the terminal, check for output patterns.
       // Strong evidence: terminal UI detected via CDP or process output.
       // Survival fallback: app didn't crash.
-      outputRendered = terminalUiDetected || startedCleanly; // Tier 2/3 fallback
+      outputRendered = terminalUiDetected || startedCleanly; // survival-tier fallback: explicit (outputRenderedTier would be "survival")
 
       // Check for PTY-related patterns
       const ptyPatterns = [/pty/i, /pseudo[\s_-]?terminal/i, /terminal[\s_-]?ready/i];
@@ -1740,7 +1797,7 @@ export async function validateTerminalFlow(
 
   const terminalEvidence = terminalUiDetected || outputRendered;
   const success = startedCleanly && noOrphanProcesses && terminatedCleanly &&
-    noSecretsLogged && (terminalEvidence || startedCleanly /* survival-tier fallback */);
+    noSecretsLogged && (terminalEvidence || startedCleanly /* survival-tier fallback: weak evidence, see confirmationTier */);
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
     cdpDetected: terminalUiDetected && cdpConnected && !terminalUiDetectedViaProcess,
@@ -1916,7 +1973,7 @@ export async function validateSessionLifecycle(
       ]);
       const errorSessionResult: SessionStateResult = {
         stateName: "session-error",
-        stateVisible: sessionErrorDirect || startedCleanly, // Tier 3 fallback: explicit
+        stateVisible: sessionErrorDirect || startedCleanly, // survival-tier fallback: see confirmationTier
         crashedOrSilent: matchesAnyPattern(allOutput, [
           /SEGFAULT/,
           /SIGSEGV/,
@@ -2075,7 +2132,7 @@ export async function validatePromptErrors(
       ]);
       const unauthError: PromptErrorStateResult = {
         stateName: "unauthenticated-prompt",
-        errorVisible: unauthDirect || startedCleanly, // Tier 3 fallback: explicit
+        errorVisible: unauthDirect || startedCleanly, // survival-tier fallback: see confirmationTier
         confirmationTier: unauthDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
         observedState: unauthDirect
@@ -2094,7 +2151,7 @@ export async function validatePromptErrors(
       ]);
       const daemonError: PromptErrorStateResult = {
         stateName: "daemon-unavailable",
-        errorVisible: daemonDirect || startedCleanly, // Tier 3 fallback: explicit
+        errorVisible: daemonDirect || startedCleanly, // survival-tier fallback: see confirmationTier
         confirmationTier: daemonDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
         observedState: daemonDirect
@@ -2115,7 +2172,7 @@ export async function validatePromptErrors(
       ]);
       const networkError: PromptErrorStateResult = {
         stateName: "backend-network-error",
-        errorVisible: networkDirect || startedCleanly, // Tier 3 fallback: explicit
+        errorVisible: networkDirect || startedCleanly, // survival-tier fallback: see confirmationTier
         confirmationTier: networkDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
         observedState: networkDirect
@@ -2134,7 +2191,7 @@ export async function validatePromptErrors(
       ]);
       const cancelError: PromptErrorStateResult = {
         stateName: "cancellation-stream-interrupt",
-        errorVisible: cancelDirect || startedCleanly, // Tier 3 fallback: explicit
+        errorVisible: cancelDirect || startedCleanly, // survival-tier fallback: see confirmationTier
         confirmationTier: cancelDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: matchesAnyPattern(allOutput, [
           /still[\s_-]?(running|processing|pending)/i,
@@ -2236,6 +2293,7 @@ export async function validateWorkspacePicker(
   let pickerUiDetectedViaProcess = false;
   let workspaceOpened = false;
   let workspaceDirectEvidence = false;
+  let workspaceOpenedTier: ConfirmationTier = "inferred";
   let uiTransitionedToWorkspace = false;
   let noMacPathIssues = true;
   let cdpConnected = false;
@@ -2271,7 +2329,8 @@ export async function validateWorkspacePicker(
     cleanupTestWorkspace(testWorkspacePath);
     return {
       success: false, startedCleanly: false, pickerUiDetected: false,
-      workspaceOpened: false, uiTransitionedToWorkspace: false,
+      workspaceOpened: false, workspaceOpenedTier: "inferred",
+      uiTransitionedToWorkspace: false,
       noMacPathIssues: false, confirmationTier: "inferred",
       cdpConnected: false, terminatedCleanly: false,
       testWorkspacePath, uiContentText: "", stdout: "", stderr: "",
@@ -2328,7 +2387,10 @@ export async function validateWorkspacePicker(
       workspaceDirectEvidence = allOutput.includes(testWorkspacePath) ||
         matchesAnyPattern(allOutput, LINUX_PATH_PATTERNS) ||
         pickerUiDetected;
-      workspaceOpened = workspaceDirectEvidence || startedCleanly; // Tier 3 fallback: explicit
+      workspaceOpened = workspaceDirectEvidence || startedCleanly; // survival-tier fallback: explicit
+      workspaceOpenedTier = workspaceDirectEvidence
+        ? (pickerUiDetected && cdpConnected && !pickerUiDetectedViaProcess ? "cdp" : "process")
+        : (startedCleanly ? "survival" : "inferred");
 
       // Check for UI transition to workspace
       // Only consider transition confirmed if we have direct evidence
@@ -2360,7 +2422,7 @@ export async function validateWorkspacePicker(
 
   const pickerEvidence = workspaceDirectEvidence || pickerUiDetected;
   const success = startedCleanly && noMacPathIssues && terminatedCleanly &&
-    (pickerEvidence || startedCleanly /* survival-tier fallback */);
+    (pickerEvidence || startedCleanly /* survival-tier fallback: explicit annotation */);
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
     cdpDetected: pickerUiDetected && cdpConnected && !pickerUiDetectedViaProcess,
@@ -2375,8 +2437,16 @@ export async function validateWorkspacePicker(
     );
   }
 
+  if (workspaceOpenedTier === "survival") {
+    warnings.push(
+      "workspaceOpened confirmed only at survival-tier (app didn't crash, but no " +
+      "direct workspace evidence found). workspaceOpenedTier field provides explicit " +
+      "confirmation level for this result."
+    );
+  }
+
   return {
-    success, startedCleanly, pickerUiDetected, workspaceOpened,
+    success, startedCleanly, pickerUiDetected, workspaceOpened, workspaceOpenedTier,
     uiTransitionedToWorkspace, noMacPathIssues, confirmationTier,
     cdpConnected, terminatedCleanly,
     testWorkspacePath, uiContentText, stdout, stderr, warnings, errors,
@@ -2486,7 +2556,7 @@ export async function validateTerminalBlocked(
           /sign[\s_-]?in/i,
           /unauthenticated/i,
         ]);
-      blockedStatesVisible = blockedDirect || startedCleanly; // Tier 3 fallback: explicit
+      blockedStatesVisible = blockedDirect || startedCleanly; // survival-tier fallback: see confirmationTier
 
       // Check for terminal hangs (app still alive and unresponsive)
       // A genuine terminal hang would show specific hang/freeze symptoms.
@@ -2546,7 +2616,7 @@ export async function validateTerminalBlocked(
   }
 
   const success = startedCleanly && noTerminalHangs && noOrphanProcesses &&
-    terminatedCleanly && (blockedDirect || startedCleanly /* survival-tier fallback */);
+    terminatedCleanly && (blockedDirect || startedCleanly /* survival-tier fallback: weak evidence, see confirmationTier */);
 
   const confirmationTier: ConfirmationTier = tierFromEvidence({
     cdpDetected: cdpConnected && blockedDirect,
@@ -2639,7 +2709,7 @@ export function formatFileBrowsingResult(result: FileBrowsingResult): string {
     `  Success:               ${result.success ? "✓" : "✗"}`,
     `  Started Cleanly:       ${result.startedCleanly ? "✓" : "✗"}`,
     `  File Browser UI:       ${result.fileBrowserUiDetected ? "✓" : "✗"}`,
-    `  Workspace Opened:      ${result.workspaceOpened ? "✓" : "✗"}`,
+    `  Workspace Opened:      ${result.workspaceOpened ? "✓" : "✗"} (tier: ${result.workspaceOpenedTier})`,
     `  No Mac Path Failures:  ${result.noMacPathFailures ? "✓" : "✗"}`,
     `  Permission Denied OK:  ${result.permissionDeniedHandled ? "✓" : "✗"} (${result.permissionDeniedTier})`,
     `  Confirmation Tier:     ${result.confirmationTier}`,
@@ -2761,7 +2831,7 @@ export function formatWorkspacePickerResult(result: WorkspacePickerResult): stri
     `  Success:                ${result.success ? "✓" : "✗"}`,
     `  Started Cleanly:        ${result.startedCleanly ? "✓" : "✗"}`,
     `  Picker UI Detected:     ${result.pickerUiDetected ? "✓" : "✗"}`,
-    `  Workspace Opened:       ${result.workspaceOpened ? "✓" : "✗"}`,
+    `  Workspace Opened:       ${result.workspaceOpened ? "✓" : "✗"} (tier: ${result.workspaceOpenedTier})`,
     `  UI Transitioned:        ${result.uiTransitionedToWorkspace ? "✓" : "✗"}`,
     `  No Mac Path Issues:     ${result.noMacPathIssues ? "✓" : "✗"}`,
     `  Confirmation Tier:      ${result.confirmationTier}`,

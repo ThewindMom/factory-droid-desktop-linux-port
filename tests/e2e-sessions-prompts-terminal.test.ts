@@ -249,6 +249,7 @@ describe("formatWorkspacePickerResult", () => {
       startedCleanly: true,
       pickerUiDetected: true,
       workspaceOpened: true,
+      workspaceOpenedTier: "cdp" as const,
       uiTransitionedToWorkspace: true,
       noMacPathIssues: true,
       confirmationTier: "cdp" as const,
@@ -446,6 +447,13 @@ describeIfAppAvailable("VAL-CROSS-007: File Browsing Works In A Linux Workspace"
 
   it("workspace is opened or app handles workspace state", () => {
     expect(result!.workspaceOpened || result!.startedCleanly).toBe(true);
+    // workspaceOpenedTier provides explicit confirmation level
+    if (result!.workspaceOpenedTier === "survival") {
+      console.warn(
+        "workspaceOpened confirmed only at survival-tier (app didn't crash, " +
+        "but no direct workspace evidence found)."
+      );
+    }
   });
 
   it("permission-denied paths are handled", () => {
@@ -690,6 +698,13 @@ describeIfAppAvailable("VAL-CROSS-016: Workspace Picker Flow Works", () => {
 
   it("Linux workspace directory is opened", () => {
     expect(result!.workspaceOpened || result!.startedCleanly).toBe(true);
+    // workspaceOpenedTier provides explicit confirmation level
+    if (result!.workspaceOpenedTier === "survival") {
+      console.warn(
+        "workspaceOpened confirmed only at survival-tier (app didn't crash, " +
+        "but no direct workspace evidence found)."
+      );
+    }
   });
 
   it("no macOS path issues", () => {

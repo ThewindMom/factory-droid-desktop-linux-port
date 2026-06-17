@@ -290,15 +290,15 @@ describeIfAppAvailable("VAL-CROSS-011: First-run unauthenticated UX is clear", (
   });
 
   it("sign-in path is available in first-run UI", () => {
-    // Full DOM inspection requires WebdriverIO/Playwright.
-    // CDP and process output checks provide best-effort verification.
-    // The test passes if the app started, rendered, and didn't crash,
-    // which is the minimum first-run UX expectation.
+    // DOM inspection tier indicates the strength of sign-in path detection:
+    // - "dom": CDP JavaScript evaluation queried the DOM (strongest)
+    // - "cdp-title": Only page title/URL was available from CDP
+    // - "unavailable": CDP connection failed, process output fallback used
     expect(result!.startedCleanly).toBe(true);
     expect(result!.rendererLoaded).toBe(true);
     if (!result!.signInPathDetected) {
       console.warn(
-        "Sign-in path not detected via CDP/process output. " +
+        `Sign-in path not detected via CDP/process output (tier: ${result!.signInDetectionTier}). ` +
         "Full verification requires WebdriverIO/Playwright DOM inspection."
       );
     }
@@ -340,12 +340,14 @@ describeIfAppAvailable("VAL-CROSS-012: Login initiation opens expected OAuth flo
   });
 
   it("login controls are present in unauthenticated UI", () => {
-    // CDP/process-based detection is best-effort; DOM inspection
-    // is the definitive check.
+    // DOM inspection tier indicates the strength of login control detection:
+    // - "dom": CDP JavaScript evaluation queried the DOM (strongest)
+    // - "cdp-title": Only page title/URL was available from CDP
+    // - "unavailable": CDP connection failed, process output fallback used
     if (!result!.loginControlFound) {
       console.warn(
-        "Login control not detected via CDP/process output. " +
-        "Full verification requires WebdriverIO/Playwright."
+        `Login control not detected (tier: ${result!.loginControlDetectionTier}). ` +
+        "Full verification requires WebdriverIO/Playwright DOM inspection."
       );
     }
   });
