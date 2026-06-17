@@ -49,7 +49,15 @@ const PROMPT_INPUT_PATTERNS = [
   /text[\s_-]?area/i,
 ];
 
-/** Patterns that indicate prompt error/feedback states (used in validatePromptErrors) */
+/**
+ * Patterns that indicate prompt error/feedback states.
+ *
+ * NOTE: validatePromptErrors() uses per-state inline patterns that are more
+ * specific than these generic patterns. This constant is kept as a shared
+ * reference for any future consumers and for documentation of the general
+ * error-signal vocabulary. It is intentionally voided to satisfy
+ * noUnusedLocals until a consumer is added.
+ */
 const PROMPT_ERROR_PATTERNS = [
   /error/i,
   /failed/i,
@@ -158,6 +166,34 @@ function filterNewProcessLines(
   });
 }
 
+// ─── Confirmation Tier ───────────────────────────────────────────────────────
+
+/**
+ * Indicates the strength of evidence behind a validation result.
+ *
+ * - "cdp":         Confirmed via Chrome DevTools Protocol page content inspection.
+ * - "process":     Confirmed via process output (stdout/stderr) pattern matching.
+ * - "survival":    Only confirmed the app started and did not crash (weakest).
+ * - "inferred":    Result is inferred from structural conditions (e.g., app
+ *                  didn't crash + no contradictory evidence), not directly observed.
+ * - "blocked":     Cannot be validated without credentials/UI interaction.
+ */
+export type ConfirmationTier = "cdp" | "process" | "survival" | "inferred" | "blocked";
+
+/**
+ * Determine the strongest confirmation tier from the available evidence.
+ */
+function tierFromEvidence(evidence: {
+  cdpDetected: boolean;
+  processOutputMatch: boolean;
+  startedCleanly: boolean;
+}): ConfirmationTier {
+  if (evidence.cdpDetected) return "cdp";
+  if (evidence.processOutputMatch) return "process";
+  if (evidence.startedCleanly) return "survival";
+  return "inferred";
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /** Options for session loading validation */
@@ -196,6 +232,8 @@ export interface SessionLoadingResult {
   terminatedCleanly: boolean;
   /** Whether Linux path assumptions caused session loading failures */
   noLinuxPathFailures: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** UI content text from CDP */
   uiContentText: string;
   /** Console messages captured */
@@ -240,6 +278,8 @@ export interface PromptSubmissionResult {
   noPromptCrashes: boolean;
   /** Whether authenticated sub-behavior is blocked (no real credentials) */
   authenticatedBlocked: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether CDP was connected */
   cdpConnected: boolean;
   /** Whether the app terminated cleanly */
@@ -292,8 +332,16 @@ export interface FileBrowsingResult {
   workspaceOpened: boolean;
   /** Whether no macOS path assumptions prevented browsing */
   noMacPathFailures: boolean;
-  /** Whether permission-denied paths show visible errors */
+  /**
+   * Whether permission-denied paths show visible errors.
+   * Marked as "inferred" in confirmationTier since we cannot interact
+   * with the UI to trigger browsing the no-access directory.
+   */
   permissionDeniedHandled: boolean;
+  /** Confirmation tier for permissionDeniedHandled evidence */
+  permissionDeniedTier: ConfirmationTier;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether CDP was connected */
   cdpConnected: boolean;
   /** Whether the app terminated cleanly */
@@ -340,12 +388,27 @@ export interface TerminalFlowResult {
   terminalUiDetected: boolean;
   /** Whether terminal output is rendered */
   outputRendered: boolean;
-  /** Whether cancellation/completion works */
+  /**
+   * Whether cancellation/completion works.
+   * This cannot be directly validated without UI automation that interacts
+   * with the terminal. The confirmationTier field indicates the evidence
+   * strength: "blocked" means no UI automation was available.
+   */
   cancellationWorks: boolean;
-  /** Whether exit status is reported */
+  /** Confirmation tier for cancellationWorks evidence */
+  cancellationTier: ConfirmationTier;
+  /**
+   * Whether exit status is reported.
+   * This cannot be directly validated without IPC/terminal interaction.
+   * The confirmationTier field indicates the evidence strength.
+   */
   exitStatusReported: boolean;
+  /** Confirmation tier for exitStatusReported evidence */
+  exitStatusTier: ConfirmationTier;
   /** Whether no orphan shell processes remain */
   noOrphanProcesses: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether CDP was connected */
   cdpConnected: boolean;
   /** Whether the app terminated cleanly */
@@ -412,6 +475,8 @@ export interface SessionLifecycleResult {
   allStatesHandled: boolean;
   /** Whether authenticated sub-behavior is blocked */
   authenticatedBlocked: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Individual state check results */
   stateResults: SessionStateResult[];
   /** Captured stdout */
@@ -446,6 +511,8 @@ export interface PromptErrorStateResult {
   stateName: string;
   /** Whether the error was visible to the user */
   errorVisible: boolean;
+  /** Confirmation tier for errorVisible evidence */
+  confirmationTier: ConfirmationTier;
   /** Whether cancellation left stale running work */
   staleWorkRemains: boolean;
   /** Observed state description */
@@ -464,6 +531,8 @@ export interface PromptErrorResult {
   allErrorsVisible: boolean;
   /** Whether no cancellation leaves stale work */
   noStaleWork: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether the app terminated cleanly */
   terminatedCleanly: boolean;
   /** Individual error state check results */
@@ -510,6 +579,8 @@ export interface WorkspacePickerResult {
   uiTransitionedToWorkspace: boolean;
   /** Whether no macOS path issues */
   noMacPathIssues: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether CDP was connected */
   cdpConnected: boolean;
   /** Whether the app terminated cleanly */
@@ -558,6 +629,8 @@ export interface TerminalBlockedResult {
   noTerminalHangs: boolean;
   /** Whether no orphan processes remain */
   noOrphanProcesses: boolean;
+  /** Confirmation tier for the strongest evidence supporting this result */
+  confirmationTier: ConfirmationTier;
   /** Whether CDP was connected */
   cdpConnected: boolean;
   /** Whether the app terminated cleanly */
@@ -977,7 +1050,7 @@ export async function validateSessionLoading(
       success: false, startedCleanly: false, sessionUiDetected: false,
       sessionsLoadedOrEmpty: false, noSessionCrashes: false, cdpConnected: false,
       rendererLoaded: false, terminatedCleanly: false, noLinuxPathFailures: false,
-      uiContentText: "", consoleMessages, stdout: "", stderr: "",
+      confirmationTier: "inferred", uiContentText: "", consoleMessages, stdout: "", stderr: "",
       warnings, errors,
     };
   }
@@ -1020,13 +1093,21 @@ export async function validateSessionLoading(
       consoleMessages.push(...launcher.getConsoleMessages());
 
       // Check for session-related content in process output
+      let sessionUiDetectedViaProcess = false;
       const allOutput = stdout + stderr;
       if (!sessionUiDetected) {
-        sessionUiDetected = matchesAnyPattern(allOutput, SESSION_UI_PATTERNS);
+        sessionUiDetectedViaProcess = matchesAnyPattern(allOutput, SESSION_UI_PATTERNS);
+        sessionUiDetected = sessionUiDetectedViaProcess;
       }
 
+      // Track whether CDP or process output confirmed the session UI
+      const _sessionCdpDetected = sessionUiDetected && cdpConnected && !sessionUiDetectedViaProcess;
+      void _sessionCdpDetected;
+
       // Check for session loading or empty state
-      sessionsLoadedOrEmpty = sessionUiDetected || startedCleanly;
+      // This is a weak proxy: if we detected session UI, we have strong evidence;
+      // otherwise, we can only say the app didn't crash (survival-tier).
+      sessionsLoadedOrEmpty = sessionUiDetected;
 
       // Check for session-related crashes
       const sessionCrashPatterns = [
@@ -1066,11 +1147,24 @@ export async function validateSessionLoading(
   // - App must start cleanly
   // - No session-related crashes
   // - No Linux path assumption failures
-  // - Session UI detected or app loaded without errors (tier 2/3 fallback)
+  // - Session UI detected, renderer loaded, or survival-tier fallback
+  //   (survival = app didn't crash, but we couldn't confirm session UI)
+  const sessionEvidence = sessionUiDetected || rendererLoaded;
   const success = startedCleanly && noSessionCrashes && noLinuxPathFailures &&
-    (sessionUiDetected || rendererLoaded || startedCleanly);
+    (sessionEvidence || startedCleanly /* survival-tier fallback */);
 
-  if (!sessionUiDetected && rendererLoaded) {
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: sessionUiDetected && cdpConnected,
+    processOutputMatch: sessionUiDetected,
+    startedCleanly,
+  });
+
+  if (!sessionUiDetected && !rendererLoaded && startedCleanly) {
+    warnings.push(
+      "Session UI not confirmed (survival-tier: app started without crash). " +
+      "Full verification requires WebdriverIO/Playwright DOM inspection."
+    );
+  } else if (!sessionUiDetected && rendererLoaded) {
     warnings.push(
       "Session UI not confirmed via CDP/process output. " +
       "Full verification requires WebdriverIO/Playwright DOM inspection."
@@ -1080,8 +1174,8 @@ export async function validateSessionLoading(
   return {
     success, startedCleanly, sessionUiDetected, sessionsLoadedOrEmpty,
     noSessionCrashes, cdpConnected, rendererLoaded, terminatedCleanly,
-    noLinuxPathFailures, uiContentText, consoleMessages, stdout, stderr,
-    warnings, errors,
+    noLinuxPathFailures, confirmationTier, uiContentText, consoleMessages,
+    stdout, stderr, warnings, errors,
   };
 }
 
@@ -1118,6 +1212,7 @@ export async function validatePromptSubmission(
   let uiContentText = "";
   let stdout = "";
   let stderr = "";
+  let promptInputDetectedViaProcess = false;
 
   const { isolatedHome, xdgConfigHome, xdgDataHome, env } = setupIsolatedEnv("factory-prompt-submit");
 
@@ -1129,7 +1224,8 @@ export async function validatePromptSubmission(
     return {
       success: false, startedCleanly: false, promptInputDetected: false,
       unauthenticatedBlockedSafely: false, noPromptCrashes: false,
-      authenticatedBlocked: true, cdpConnected: false, terminatedCleanly: false,
+      authenticatedBlocked: true, confirmationTier: "inferred",
+      cdpConnected: false, terminatedCleanly: false,
       noSecretsLogged: true, secretPatternsFound: [], uiContentText: "",
       consoleMessages, stdout: "", stderr: "", warnings, errors,
     };
@@ -1172,12 +1268,16 @@ export async function validatePromptSubmission(
 
       // Check for prompt input UI via process output
       if (!promptInputDetected) {
-        promptInputDetected = matchesAnyPattern(allOutput, PROMPT_INPUT_PATTERNS);
+        promptInputDetectedViaProcess = matchesAnyPattern(allOutput, PROMPT_INPUT_PATTERNS);
+        promptInputDetected = promptInputDetectedViaProcess;
       }
 
       // Check for unauthenticated blocking behavior
       // When unauthenticated, prompt submission should show visible feedback
-      // (sign-in required, login required, etc.) rather than crashing
+      // (sign-in required, login required, etc.) rather than crashing.
+      // We distinguish between:
+      //   - Direct evidence: auth-block patterns found in output (process tier)
+      //   - Inferred evidence: no crash patterns, but no auth-block patterns either
       const authBlockPatterns = [
         /sign[\s_-]?in/i,
         /log[\s_-]?in/i,
@@ -1186,8 +1286,20 @@ export async function validatePromptSubmission(
         /login[\s_-]?(required|needed)/i,
         /must[\s_-]be[\s_-]logged/i,
       ];
-      unauthenticatedBlockedSafely = matchesAnyPattern(allOutput, authBlockPatterns) ||
-        !matchesAnyPattern(allOutput, [/crashed/i, /fatal/i, /segfault/i]);
+      const authBlockDirect = matchesAnyPattern(allOutput, authBlockPatterns);
+      const crashPatterns = [/crashed/i, /fatal/i, /segfault/i];
+      const hasCrash = matchesAnyPattern(allOutput, crashPatterns);
+      if (authBlockDirect) {
+        unauthenticatedBlockedSafely = true;
+      } else if (!hasCrash) {
+        // Inferred: app didn't crash, but we didn't see explicit auth-block text.
+        // This is weaker evidence; log it.
+        unauthenticatedBlockedSafely = true;
+        warnings.push(
+          "Unauthenticated blocking inferred from absence of crash patterns, " +
+          "not from explicit auth-block UI feedback."
+        );
+      }
 
       // Check for prompt-related crashes
       if (matchesAnyPattern(allOutput, [/prompt[\s_-]?(crash|fatal|error)/i])) {
@@ -1217,14 +1329,24 @@ export async function validatePromptSubmission(
     }
   }
 
-  const success = startedCleanly && noPromptCrashes && (unauthenticatedBlockedSafely || promptInputDetected || startedCleanly) &&
+  // Success requires clean start, no crashes, safe blocking (or UI detected
+  // or survival-tier fallback), no secrets, clean termination.
+  const promptEvidence = unauthenticatedBlockedSafely || promptInputDetected;
+  const success = startedCleanly && noPromptCrashes &&
+    (promptEvidence || startedCleanly /* survival-tier fallback */) &&
     noSecretsLogged && terminatedCleanly;
+
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: promptInputDetected && cdpConnected && !promptInputDetectedViaProcess,
+    processOutputMatch: promptInputDetected || unauthenticatedBlockedSafely,
+    startedCleanly,
+  });
 
   return {
     success, startedCleanly, promptInputDetected, unauthenticatedBlockedSafely,
-    noPromptCrashes, authenticatedBlocked, cdpConnected, terminatedCleanly,
-    noSecretsLogged, secretPatternsFound, uiContentText, consoleMessages,
-    stdout, stderr, warnings, errors,
+    noPromptCrashes, authenticatedBlocked, confirmationTier, cdpConnected,
+    terminatedCleanly, noSecretsLogged, secretPatternsFound, uiContentText,
+    consoleMessages, stdout, stderr, warnings, errors,
   };
 }
 
@@ -1251,9 +1373,15 @@ export async function validateFileBrowsing(
 
   let startedCleanly = false;
   let fileBrowserUiDetected = false;
+  let fileBrowserUiDetectedViaProcess = false;
   let workspaceOpened = false;
+  let workspaceDirectEvidence = false;
   let noMacPathFailures = true;
-  const permissionDeniedHandled = true;
+  // permissionDeniedHandled: we cannot interact with the UI to browse the
+  // no-access directory, so this starts as inferred. If we find explicit
+  // permission-denied patterns in the output, we upgrade to process tier.
+  let permissionDeniedHandled = true;
+  let permissionDeniedTier: ConfirmationTier = "inferred";
   let cdpConnected = false;
   let terminatedCleanly = false;
   let uiContentText = "";
@@ -1287,6 +1415,7 @@ export async function validateFileBrowsing(
     return {
       success: false, startedCleanly: false, fileBrowserUiDetected: false,
       workspaceOpened: false, noMacPathFailures: false, permissionDeniedHandled: false,
+      permissionDeniedTier: "inferred", confirmationTier: "inferred",
       cdpConnected: false, terminatedCleanly: false, testWorkspacePath,
       uiContentText: "", consoleMessages, stdout: "", stderr: "",
       warnings, errors,
@@ -1330,14 +1459,18 @@ export async function validateFileBrowsing(
 
       // Check for file browser UI via process output
       if (!fileBrowserUiDetected) {
-        fileBrowserUiDetected = matchesAnyPattern(allOutput, FILE_BROWSER_PATTERNS);
+        fileBrowserUiDetectedViaProcess = matchesAnyPattern(allOutput, FILE_BROWSER_PATTERNS);
+        fileBrowserUiDetected = fileBrowserUiDetectedViaProcess;
       }
 
       // Check for workspace opened
-      workspaceOpened = matchesAnyPattern(allOutput, LINUX_PATH_PATTERNS) ||
+      // Strong evidence: Linux path or workspace path in output or file browser UI detected
+      // Survival fallback: app didn't crash (weak, but acceptable as last resort)
+      workspaceDirectEvidence =
+        matchesAnyPattern(allOutput, LINUX_PATH_PATTERNS) ||
         allOutput.includes(testWorkspacePath) ||
-        fileBrowserUiDetected ||
-        startedCleanly; // Tier 3 fallback
+        fileBrowserUiDetected;
+      workspaceOpened = workspaceDirectEvidence || startedCleanly; // Tier 3 fallback
 
       // Check for macOS path assumption failures
       if (matchesAnyPattern(allOutput, MACOS_PATH_ERROR_PATTERNS)) {
@@ -1347,15 +1480,31 @@ export async function validateFileBrowsing(
 
       // Check for permission-denied handling
       // Since we can't actually interact with the UI to browse the no-access dir,
-      // we verify the app didn't crash and the permission-denied dir exists
-      if (fs.existsSync(permissionDeniedPath)) {
-        // Verify the permission-denied dir is still locked
-        try {
-          fs.readdirSync(permissionDeniedPath);
-          // If we can read it, the chmod may not have worked; that's OK
-        } catch {
-          // Permission denied is working as expected
-        }
+      // we check for explicit permission-denied patterns in output (process tier)
+      // or fall back to inferred (app didn't crash, dir exists, but no explicit
+      // permission-denied UI feedback was observed).
+      const permDeniedPatterns = [
+        /permission[\s_-]?denied/i,
+        /access[\s_-]?denied/i,
+        /cannot[\s_-]access/i,
+        /not[\s_-]accessible/i,
+        /forbidden/i,
+      ];
+      if (matchesAnyPattern(allOutput, permDeniedPatterns)) {
+        // Explicit evidence that the app shows permission-denied feedback
+        permissionDeniedHandled = true;
+        permissionDeniedTier = "process";
+      } else if (fs.existsSync(permissionDeniedPath)) {
+        // No explicit permission-denied pattern found in output.
+        // The permission-denied dir exists but we couldn't trigger browsing it.
+        // Mark as inferred: the app didn't crash, but we have no direct evidence.
+        permissionDeniedHandled = true;
+        permissionDeniedTier = "inferred";
+        warnings.push(
+          "Permission-denied handling not directly confirmed. " +
+          "The no-access directory exists but no explicit permission-denied " +
+          "feedback was observed in app output."
+        );
       }
     }
 
@@ -1376,19 +1525,34 @@ export async function validateFileBrowsing(
     }
   }
 
+  const fileEvidence = workspaceDirectEvidence || fileBrowserUiDetected;
   const success = startedCleanly && noMacPathFailures && terminatedCleanly &&
-    (workspaceOpened || fileBrowserUiDetected || startedCleanly);
+    (fileEvidence || startedCleanly /* survival-tier fallback */);
 
-  if (!fileBrowserUiDetected) {
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: fileBrowserUiDetected && cdpConnected && !fileBrowserUiDetectedViaProcess,
+    processOutputMatch: fileEvidence,
+    startedCleanly,
+  });
+
+  if (!fileBrowserUiDetected && !workspaceDirectEvidence) {
     warnings.push(
-      "File browser UI not confirmed via CDP/process output. " +
+      "File browser UI not confirmed (survival-tier: app started without crash). " +
       "Full verification requires WebdriverIO/Playwright DOM inspection."
+    );
+  }
+
+  if (permissionDeniedTier === "inferred") {
+    warnings.push(
+      "Permission-denied handling is inferred (not directly observed). " +
+      "UI automation is needed to confirm visible error for inaccessible paths."
     );
   }
 
   return {
     success, startedCleanly, fileBrowserUiDetected, workspaceOpened,
-    noMacPathFailures, permissionDeniedHandled, cdpConnected, terminatedCleanly,
+    noMacPathFailures, permissionDeniedHandled, permissionDeniedTier,
+    confirmationTier, cdpConnected, terminatedCleanly,
     testWorkspacePath, uiContentText, consoleMessages, stdout, stderr,
     warnings, errors,
   };
@@ -1417,9 +1581,16 @@ export async function validateTerminalFlow(
 
   let startedCleanly = false;
   let terminalUiDetected = false;
+  let terminalUiDetectedViaProcess = false;
   let outputRendered = false;
-  const cancellationWorks = true; // Default true since we can't test cancellation without UI automation
-  const exitStatusReported = true; // Default true since we verify cleanup
+  // cancellationWorks: cannot be directly validated without UI automation that
+  // interacts with the terminal (sends Ctrl-C, clicks cancel). Mark as blocked.
+  const cancellationWorks = true;
+  const cancellationTier: ConfirmationTier = "blocked";
+  // exitStatusReported: cannot be directly validated without IPC/terminal
+  // interaction. Mark as blocked.
+  const exitStatusReported = true;
+  const exitStatusTier: ConfirmationTier = "blocked";
   let noOrphanProcesses = true;
   let cdpConnected = false;
   let terminatedCleanly = false;
@@ -1456,7 +1627,9 @@ export async function validateTerminalFlow(
     try { fs.rmSync(testWorkspace, { recursive: true, force: true }); } catch { /* ignore */ }
     return {
       success: false, startedCleanly: false, terminalUiDetected: false,
-      outputRendered: false, cancellationWorks: false, exitStatusReported: false,
+      outputRendered: false, cancellationWorks: false, cancellationTier: "blocked",
+      exitStatusReported: false, exitStatusTier: "blocked",
+      confirmationTier: "inferred",
       noOrphanProcesses: false, cdpConnected: false, terminatedCleanly: false,
       noSecretsLogged: true, secretPatternsFound: [], uiContentText: "",
       consoleMessages, stdout: "", stderr: "", processesAfterCleanup: [],
@@ -1501,11 +1674,14 @@ export async function validateTerminalFlow(
 
       // Check for terminal UI via process output
       if (!terminalUiDetected) {
-        terminalUiDetected = matchesAnyPattern(allOutput, TERMINAL_UI_PATTERNS);
+        terminalUiDetectedViaProcess = matchesAnyPattern(allOutput, TERMINAL_UI_PATTERNS);
+        terminalUiDetected = terminalUiDetectedViaProcess;
       }
 
       // Check for terminal output rendering
-      // Since we can't interact with the terminal, check for output patterns
+      // Since we can't interact with the terminal, check for output patterns.
+      // Strong evidence: terminal UI detected via CDP or process output.
+      // Survival fallback: app didn't crash.
       outputRendered = terminalUiDetected || startedCleanly; // Tier 2/3 fallback
 
       // Check for PTY-related patterns
@@ -1562,8 +1738,15 @@ export async function validateTerminalFlow(
     try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  const terminalEvidence = terminalUiDetected || outputRendered;
   const success = startedCleanly && noOrphanProcesses && terminatedCleanly &&
-    noSecretsLogged && (terminalUiDetected || outputRendered || startedCleanly);
+    noSecretsLogged && (terminalEvidence || startedCleanly /* survival-tier fallback */);
+
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: terminalUiDetected && cdpConnected && !terminalUiDetectedViaProcess,
+    processOutputMatch: terminalEvidence,
+    startedCleanly,
+  });
 
   if (!terminalUiDetected) {
     warnings.push(
@@ -1572,9 +1755,16 @@ export async function validateTerminalFlow(
     );
   }
 
+  // Log the blocked-tier fields explicitly
+  warnings.push(
+    "cancellationWorks and exitStatusReported are blocked-tier: " +
+    "cannot be validated without UI automation that interacts with the terminal."
+  );
+
   return {
     success, startedCleanly, terminalUiDetected, outputRendered,
-    cancellationWorks, exitStatusReported, noOrphanProcesses, cdpConnected,
+    cancellationWorks, cancellationTier, exitStatusReported, exitStatusTier,
+    confirmationTier, noOrphanProcesses, cdpConnected,
     terminatedCleanly, noSecretsLogged, secretPatternsFound, uiContentText,
     consoleMessages, stdout, stderr, processesAfterCleanup, warnings, errors,
   };
@@ -1633,6 +1823,7 @@ export async function validateSessionLifecycle(
     return {
       success: false, startedCleanly: false, cdpConnected: false,
       terminatedCleanly: false, allStatesHandled: false, authenticatedBlocked: true,
+      confirmationTier: "inferred",
       stateResults: [], stdout: "", stderr: "", warnings, errors,
     };
   }
@@ -1712,24 +1903,29 @@ export async function validateSessionLifecycle(
       stateResults.push(newSessionResult);
 
       // Test: Session load/API error state
+      // Use more specific patterns instead of overly broad /error/i or /failed/i
+      // which match unrelated log noise. Tier-3 fallback (startedCleanly) is
+      // explicit and does not masquerade as strong verification.
+      const sessionErrorDirect = matchesAnyPattern(allOutput, [
+        /session[\s_-]?(error|fail)/i,
+        /unable[\s_-]to[\s_-](load|fetch|connect)/i,
+        /not[\s_-]available/i,
+        /sign[\s_-]?in/i,
+        /unauthenticated/i,
+        /connection[\s_-]?(error|failed|refused)/i,
+      ]);
       const errorSessionResult: SessionStateResult = {
         stateName: "session-error",
-        stateVisible: matchesAnyPattern(allOutput, [
-          /error/i,
-          /failed/i,
-          /unable[\s_-]to/i,
-          /not[\s_-]available/i,
-          /sign[\s_-]?in/i,
-          /unauthenticated/i,
-          /connection[\s_-]?(error|failed|refused)/i,
-        ]) || startedCleanly, // Tier 3 fallback
+        stateVisible: sessionErrorDirect || startedCleanly, // Tier 3 fallback: explicit
         crashedOrSilent: matchesAnyPattern(allOutput, [
           /SEGFAULT/,
           /SIGSEGV/,
           /Fatal error/i,
           /unhandled[\s_-]exception/i,
         ]) || !startedCleanly,
-        observedState: "Session API error or sign-in required state visible",
+        observedState: sessionErrorDirect
+          ? "Session API error or sign-in required state visible"
+          : "No explicit session-error pattern (survival-tier: app did not crash)",
       };
       stateResults.push(errorSessionResult);
 
@@ -1739,12 +1935,16 @@ export async function validateSessionLifecycle(
       );
 
       // Check for authenticated blocking
-      authenticatedBlocked = matchesAnyPattern(allOutput, [
+      // Direct evidence: explicit auth-required patterns in output.
+      // Do NOT use the absence of "authenticated"/"logged in" as evidence of
+      // blocking - that is a near-tautological inference.
+      const authBlockedDirect = matchesAnyPattern(allOutput, [
         /sign[\s_-]?in/i,
         /unauthenticated/i,
         /login[\s_-]?(required|needed)/i,
         /not[\s_-]authorized/i,
-      ]) || !matchesAnyPattern(allOutput, [/authenticated/i, /logged[\s_-]?in/i]);
+      ]);
+      authenticatedBlocked = authBlockedDirect;
     }
 
     stdout = launcher.getStdout();
@@ -1764,6 +1964,12 @@ export async function validateSessionLifecycle(
 
   const success = startedCleanly && allStatesHandled && terminatedCleanly;
 
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: cdpConnected && stateResults.some((s) => s.stateVisible),
+    processOutputMatch: stateResults.some((s) => s.stateVisible),
+    startedCleanly,
+  });
+
   if (stateResults.some((s) => !s.stateVisible)) {
     warnings.push(
       "Some session lifecycle states not confirmed via CDP/process output. " +
@@ -1773,8 +1979,8 @@ export async function validateSessionLifecycle(
 
   return {
     success, startedCleanly, cdpConnected, terminatedCleanly,
-    allStatesHandled, authenticatedBlocked, stateResults, stdout, stderr,
-    warnings, errors,
+    allStatesHandled, authenticatedBlocked, confirmationTier,
+    stateResults, stdout, stderr, warnings, errors,
   };
 }
 
@@ -1818,7 +2024,8 @@ export async function validatePromptErrors(
     errors.push(`Executable not found: ${executablePath}`);
     return {
       success: false, startedCleanly: false, cdpConnected: false,
-      allErrorsVisible: false, noStaleWork: false, terminatedCleanly: false,
+      allErrorsVisible: false, noStaleWork: false, confirmationTier: "inferred",
+      terminatedCleanly: false,
       errorStateResults: [], stdout: "", stderr: "", warnings, errors,
     };
   }
@@ -1854,65 +2061,83 @@ export async function validatePromptErrors(
       const allOutput = stdout + stderr + uiContent;
 
       // Test: Unauthenticated prompt error
+      const unauthDirect = matchesAnyPattern(allOutput, [
+        /sign[\s_-]?in/i,
+        /log[\s_-]?in/i,
+        /unauthenticated/i,
+        /not[\s_-]authorized/i,
+        /login[\s_-]?(required|needed)/i,
+      ]);
       const unauthError: PromptErrorStateResult = {
         stateName: "unauthenticated-prompt",
-        errorVisible: matchesAnyPattern(allOutput, [
-          /sign[\s_-]?in/i,
-          /log[\s_-]?in/i,
-          /unauthenticated/i,
-          /not[\s_-]authorized/i,
-          /login[\s_-]?(required|needed)/i,
-        ]) || startedCleanly, // Tier 3 fallback: app didn't crash
+        errorVisible: unauthDirect || startedCleanly, // Tier 3 fallback: explicit
+        confirmationTier: unauthDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
-        observedState: "Unauthenticated prompt submission shows sign-in/login required",
+        observedState: unauthDirect
+          ? "Unauthenticated prompt submission shows sign-in/login required"
+          : "No explicit auth-block pattern (survival-tier: app did not crash)",
       };
       errorStateResults.push(unauthError);
 
       // Test: Daemon unavailable error
+      const daemonDirect = matchesAnyPattern(allOutput, [
+        /daemon[\s_-]?(not[\s_-]found|unavailable|error|offline)/i,
+        /connection[\s_-]?(refused|error|failed)/i,
+        /backend[\s_-]?(unavailable|error)/i,
+        /service[\s_-]?(unavailable|error)/i,
+        /not[\s_-]connected/i,
+      ]);
       const daemonError: PromptErrorStateResult = {
         stateName: "daemon-unavailable",
-        errorVisible: matchesAnyPattern(allOutput, [
-          /daemon[\s_-]?(not[\s_-]found|unavailable|error|offline)/i,
-          /connection[\s_-]?(refused|error|failed)/i,
-          /backend[\s_-]?(unavailable|error)/i,
-          /service[\s_-]?(unavailable|error)/i,
-          /not[\s_-]connected/i,
-        ]) || startedCleanly, // Tier 3 fallback
+        errorVisible: daemonDirect || startedCleanly, // Tier 3 fallback: explicit
+        confirmationTier: daemonDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
-        observedState: "Daemon unavailable prompt error shows visible feedback",
+        observedState: daemonDirect
+          ? "Daemon unavailable prompt error shows visible feedback"
+          : "No explicit daemon-error pattern (survival-tier: app did not crash)",
       };
       errorStateResults.push(daemonError);
 
       // Test: Backend/network error
+      // NOTE: Removed overly broad /error/i pattern that would match any
+      // "error" mention in logs. Using specific network/backend patterns only.
+      const networkDirect = matchesAnyPattern(allOutput, [
+        /network[\s_-]?(error|failure|unreachable)/i,
+        /connection[\s_-]?(error|failed|timeout)/i,
+        /server[\s_-]?(error|unavailable)/i,
+        /request[\s_-]?(failed|error)/i,
+        /backend[\s_-]?(error|unavailable)/i,
+      ]);
       const networkError: PromptErrorStateResult = {
         stateName: "backend-network-error",
-        errorVisible: matchesAnyPattern(allOutput, [
-          /network[\s_-]?(error|failure|unreachable)/i,
-          /connection[\s_-]?(error|failed|timeout)/i,
-          /server[\s_-]?(error|unavailable)/i,
-          /request[\s_-]?(failed|error)/i,
-          /error/i,
-        ]) || startedCleanly, // Tier 3 fallback
+        errorVisible: networkDirect || startedCleanly, // Tier 3 fallback: explicit
+        confirmationTier: networkDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: false,
-        observedState: "Network/backend error shows visible feedback",
+        observedState: networkDirect
+          ? "Network/backend error shows visible feedback"
+          : "No explicit network-error pattern (survival-tier: app did not crash)",
       };
       errorStateResults.push(networkError);
 
       // Test: Cancellation/stream interruption
+      const cancelDirect = matchesAnyPattern(allOutput, [
+        /cancel/i,
+        /interrupt/i,
+        /stop/i,
+        /stream[\s_-]?(interrupted|stopped|error)/i,
+        /aborted/i,
+      ]);
       const cancelError: PromptErrorStateResult = {
         stateName: "cancellation-stream-interrupt",
-        errorVisible: matchesAnyPattern(allOutput, [
-          /cancel/i,
-          /interrupt/i,
-          /stop/i,
-          /stream[\s_-]?(interrupted|stopped|error)/i,
-          /aborted/i,
-        ]) || startedCleanly, // Tier 3 fallback
+        errorVisible: cancelDirect || startedCleanly, // Tier 3 fallback: explicit
+        confirmationTier: cancelDirect ? "process" : (startedCleanly ? "survival" : "inferred"),
         staleWorkRemains: matchesAnyPattern(allOutput, [
           /still[\s_-]?(running|processing|pending)/i,
           /pending[\s_-]?(request|prompt|response)/i,
         ]),
-        observedState: "Cancellation/stream interruption shows visible feedback",
+        observedState: cancelDirect
+          ? "Cancellation/stream interruption shows visible feedback"
+          : "No explicit cancellation pattern (survival-tier: app did not crash)",
       };
       errorStateResults.push(cancelError);
 
@@ -1960,16 +2185,24 @@ export async function validatePromptErrors(
 
   const success = startedCleanly && allErrorsVisible && noStaleWork && terminatedCleanly;
 
-  if (errorStateResults.some((e) => !e.errorVisible)) {
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: cdpConnected && errorStateResults.some((e) => e.errorVisible),
+    processOutputMatch: errorStateResults.some((e) => e.confirmationTier === "process"),
+    startedCleanly,
+  });
+
+  if (errorStateResults.some((e) => e.confirmationTier === "survival")) {
     warnings.push(
-      "Some prompt error states not confirmed via CDP/process output. " +
+      "Some prompt error states confirmed only at survival-tier " +
+      "(app didn't crash, but no explicit error pattern found in output). " +
       "Full verification requires WebdriverIO/Playwright DOM inspection."
     );
   }
 
   return {
     success, startedCleanly, cdpConnected, allErrorsVisible, noStaleWork,
-    terminatedCleanly, errorStateResults, stdout, stderr, warnings, errors,
+    confirmationTier, terminatedCleanly, errorStateResults, stdout, stderr,
+    warnings, errors,
   };
 }
 
@@ -1995,7 +2228,9 @@ export async function validateWorkspacePicker(
 
   let startedCleanly = false;
   let pickerUiDetected = false;
+  let pickerUiDetectedViaProcess = false;
   let workspaceOpened = false;
+  let workspaceDirectEvidence = false;
   let uiTransitionedToWorkspace = false;
   let noMacPathIssues = true;
   let cdpConnected = false;
@@ -2032,7 +2267,8 @@ export async function validateWorkspacePicker(
     return {
       success: false, startedCleanly: false, pickerUiDetected: false,
       workspaceOpened: false, uiTransitionedToWorkspace: false,
-      noMacPathIssues: false, cdpConnected: false, terminatedCleanly: false,
+      noMacPathIssues: false, confirmationTier: "inferred",
+      cdpConnected: false, terminatedCleanly: false,
       testWorkspacePath, uiContentText: "", stdout: "", stderr: "",
       warnings, errors,
     };
@@ -2079,17 +2315,19 @@ export async function validateWorkspacePicker(
 
       // Check for workspace picker UI via process output
       if (!pickerUiDetected) {
-        pickerUiDetected = matchesAnyPattern(allOutput, FILE_BROWSER_PATTERNS);
+        pickerUiDetectedViaProcess = matchesAnyPattern(allOutput, FILE_BROWSER_PATTERNS);
+        pickerUiDetected = pickerUiDetectedViaProcess;
       }
 
       // Check for workspace opening
-      workspaceOpened = allOutput.includes(testWorkspacePath) ||
+      workspaceDirectEvidence = allOutput.includes(testWorkspacePath) ||
         matchesAnyPattern(allOutput, LINUX_PATH_PATTERNS) ||
-        pickerUiDetected ||
-        startedCleanly; // Tier 3 fallback
+        pickerUiDetected;
+      workspaceOpened = workspaceDirectEvidence || startedCleanly; // Tier 3 fallback: explicit
 
       // Check for UI transition to workspace
-      uiTransitionedToWorkspace = workspaceOpened || startedCleanly;
+      // Only consider transition confirmed if we have direct evidence
+      uiTransitionedToWorkspace = workspaceDirectEvidence;
 
       // Check for macOS path issues
       if (matchesAnyPattern(allOutput, MACOS_PATH_ERROR_PATTERNS)) {
@@ -2115,19 +2353,27 @@ export async function validateWorkspacePicker(
     }
   }
 
+  const pickerEvidence = workspaceDirectEvidence || pickerUiDetected;
   const success = startedCleanly && noMacPathIssues && terminatedCleanly &&
-    (workspaceOpened || pickerUiDetected || startedCleanly);
+    (pickerEvidence || startedCleanly /* survival-tier fallback */);
 
-  if (!pickerUiDetected) {
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: pickerUiDetected && cdpConnected && !pickerUiDetectedViaProcess,
+    processOutputMatch: pickerEvidence,
+    startedCleanly,
+  });
+
+  if (!pickerUiDetected && !workspaceDirectEvidence) {
     warnings.push(
-      "Workspace picker UI not confirmed via CDP/process output. " +
+      "Workspace picker UI not confirmed (survival-tier: app started without crash). " +
       "Full verification requires WebdriverIO/Playwright DOM inspection."
     );
   }
 
   return {
     success, startedCleanly, pickerUiDetected, workspaceOpened,
-    uiTransitionedToWorkspace, noMacPathIssues, cdpConnected, terminatedCleanly,
+    uiTransitionedToWorkspace, noMacPathIssues, confirmationTier,
+    cdpConnected, terminatedCleanly,
     testWorkspacePath, uiContentText, stdout, stderr, warnings, errors,
   };
 }
@@ -2155,6 +2401,7 @@ export async function validateTerminalBlocked(
 
   let startedCleanly = false;
   let blockedStatesVisible = false;
+  let blockedDirect = false;
   let partialProcessCleaned = true;
   let noTerminalHangs = true;
   let noOrphanProcesses = true;
@@ -2178,7 +2425,8 @@ export async function validateTerminalBlocked(
     return {
       success: false, startedCleanly: false, blockedStatesVisible: false,
       partialProcessCleaned: false, noTerminalHangs: false,
-      noOrphanProcesses: false, cdpConnected: false, terminatedCleanly: false,
+      noOrphanProcesses: false, confirmationTier: "inferred",
+      cdpConnected: false, terminatedCleanly: false,
       uiContentText: "", consoleMessages, stdout: "", stderr: "",
       processesAfterCleanup: [], warnings, errors,
     };
@@ -2219,7 +2467,10 @@ export async function validateTerminalBlocked(
       const allOutput = stdout + stderr + uiContentText;
 
       // Check for terminal blocked state visibility
-      blockedStatesVisible = matchesAnyPattern(allOutput, TERMINAL_BLOCKED_PATTERNS) ||
+      // Direct evidence: terminal blocked/error patterns or generic blocked patterns.
+      // Tier-3 fallback (startedCleanly) is explicit and does not masquerade
+      // as strong UI verification.
+      blockedDirect = matchesAnyPattern(allOutput, TERMINAL_BLOCKED_PATTERNS) ||
         matchesAnyPattern(allOutput, TERMINAL_UI_PATTERNS) ||
         // Also check for generic blocked/no-workspace patterns
         matchesAnyPattern(allOutput, [
@@ -2229,8 +2480,8 @@ export async function validateTerminalBlocked(
           /folder[\s_-]?(required|needed)/i,
           /sign[\s_-]?in/i,
           /unauthenticated/i,
-        ]) ||
-        startedCleanly; // Tier 3 fallback: app didn't crash
+        ]);
+      blockedStatesVisible = blockedDirect || startedCleanly; // Tier 3 fallback: explicit
 
       // Check for terminal hangs (app still alive and unresponsive)
       // A genuine terminal hang would show specific hang/freeze symptoms.
@@ -2290,20 +2541,26 @@ export async function validateTerminalBlocked(
   }
 
   const success = startedCleanly && noTerminalHangs && noOrphanProcesses &&
-    terminatedCleanly && (blockedStatesVisible || startedCleanly);
+    terminatedCleanly && (blockedDirect || startedCleanly /* survival-tier fallback */);
 
-  if (!matchesAnyPattern(stdout + stderr + uiContentText, TERMINAL_BLOCKED_PATTERNS)) {
+  const confirmationTier: ConfirmationTier = tierFromEvidence({
+    cdpDetected: cdpConnected && blockedDirect,
+    processOutputMatch: blockedDirect,
+    startedCleanly,
+  });
+
+  if (!blockedDirect && startedCleanly) {
     warnings.push(
-      "Terminal blocked states not confirmed via CDP/process output. " +
+      "Terminal blocked states not confirmed (survival-tier: app started without crash). " +
       "Full verification requires IPC driver or WebdriverIO/Playwright."
     );
   }
 
   return {
     success, startedCleanly, blockedStatesVisible, partialProcessCleaned,
-    noTerminalHangs, noOrphanProcesses, cdpConnected, terminatedCleanly,
-    uiContentText, consoleMessages, stdout, stderr, processesAfterCleanup,
-    warnings, errors,
+    noTerminalHangs, noOrphanProcesses, confirmationTier, cdpConnected,
+    terminatedCleanly, uiContentText, consoleMessages, stdout, stderr,
+    processesAfterCleanup, warnings, errors,
   };
 }
 
@@ -2324,6 +2581,7 @@ export function formatSessionLoadingResult(result: SessionLoadingResult): string
     `  Renderer Loaded:      ${result.rendererLoaded ? "✓" : "✗"}`,
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  No Linux Path Issues: ${result.noLinuxPathFailures ? "✓" : "✗"}`,
+    `  Confirmation Tier:    ${result.confirmationTier}`,
   ];
   if (result.warnings.length > 0) {
     lines.push("  Warnings:");
@@ -2351,6 +2609,7 @@ export function formatPromptSubmissionResult(result: PromptSubmissionResult): st
     `  CDP Connected:             ${result.cdpConnected ? "✓" : "✗"}`,
     `  Terminated Cleanly:        ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  No Secrets Logged:         ${result.noSecretsLogged ? "✓" : "✗"}`,
+    `  Confirmation Tier:         ${result.confirmationTier}`,
   ];
   if (result.secretPatternsFound.length > 0) {
     lines.push(`  Secret Patterns Found:     ${result.secretPatternsFound.join(", ")}`);
@@ -2377,7 +2636,8 @@ export function formatFileBrowsingResult(result: FileBrowsingResult): string {
     `  File Browser UI:       ${result.fileBrowserUiDetected ? "✓" : "✗"}`,
     `  Workspace Opened:      ${result.workspaceOpened ? "✓" : "✗"}`,
     `  No Mac Path Failures:  ${result.noMacPathFailures ? "✓" : "✗"}`,
-    `  Permission Denied OK:  ${result.permissionDeniedHandled ? "✓" : "✗"}`,
+    `  Permission Denied OK:  ${result.permissionDeniedHandled ? "✓" : "✗"} (${result.permissionDeniedTier})`,
+    `  Confirmation Tier:     ${result.confirmationTier}`,
     `  CDP Connected:         ${result.cdpConnected ? "✓" : "✗"}`,
     `  Terminated Cleanly:    ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  Test Workspace:        ${result.testWorkspacePath}`,
@@ -2403,8 +2663,9 @@ export function formatTerminalFlowResult(result: TerminalFlowResult): string {
     `  Started Cleanly:      ${result.startedCleanly ? "✓" : "✗"}`,
     `  Terminal UI Detected: ${result.terminalUiDetected ? "✓" : "✗"}`,
     `  Output Rendered:      ${result.outputRendered ? "✓" : "✗"}`,
-    `  Cancellation Works:   ${result.cancellationWorks ? "✓" : "✗"}`,
-    `  Exit Status Reported: ${result.exitStatusReported ? "✓" : "✗"}`,
+    `  Cancellation Works:   ${result.cancellationWorks ? "✓" : "✗"} (${result.cancellationTier})`,
+    `  Exit Status Reported: ${result.exitStatusReported ? "✓" : "✗"} (${result.exitStatusTier})`,
+    `  Confirmation Tier:    ${result.confirmationTier}`,
     `  No Orphan Processes:  ${result.noOrphanProcesses ? "✓" : "✗"}`,
     `  CDP Connected:        ${result.cdpConnected ? "✓" : "✗"}`,
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
@@ -2436,6 +2697,7 @@ export function formatSessionLifecycleResult(result: SessionLifecycleResult): st
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  All States Handled:   ${result.allStatesHandled ? "✓" : "✗"}`,
     `  Authenticated Blocked:${result.authenticatedBlocked ? "✓" : "✗"}`,
+    `  Confirmation Tier:    ${result.confirmationTier}`,
     "",
     "  Session State Results:",
   ];
@@ -2465,12 +2727,13 @@ export function formatPromptErrorResult(result: PromptErrorResult): string {
     `  CDP Connected:        ${result.cdpConnected ? "✓" : "✗"}`,
     `  All Errors Visible:   ${result.allErrorsVisible ? "✓" : "✗"}`,
     `  No Stale Work:        ${result.noStaleWork ? "✓" : "✗"}`,
+    `  Confirmation Tier:    ${result.confirmationTier}`,
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
     "",
     "  Error State Results:",
   ];
   for (const e of result.errorStateResults) {
-    lines.push(`    ${e.stateName}: visible=${e.errorVisible ? "✓" : "✗"} stale=${e.staleWorkRemains ? "✗" : "✓"}`);
+    lines.push(`    ${e.stateName}: visible=${e.errorVisible ? "✓" : "✗"} tier=${e.confirmationTier} stale=${e.staleWorkRemains ? "✗" : "✓"}`);
     lines.push(`      ${e.observedState}`);
   }
   if (result.warnings.length > 0) {
@@ -2496,6 +2759,7 @@ export function formatWorkspacePickerResult(result: WorkspacePickerResult): stri
     `  Workspace Opened:       ${result.workspaceOpened ? "✓" : "✗"}`,
     `  UI Transitioned:        ${result.uiTransitionedToWorkspace ? "✓" : "✗"}`,
     `  No Mac Path Issues:     ${result.noMacPathIssues ? "✓" : "✗"}`,
+    `  Confirmation Tier:      ${result.confirmationTier}`,
     `  CDP Connected:          ${result.cdpConnected ? "✓" : "✗"}`,
     `  Terminated Cleanly:     ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  Test Workspace:         ${result.testWorkspacePath}`,
@@ -2523,6 +2787,7 @@ export function formatTerminalBlockedResult(result: TerminalBlockedResult): stri
     `  Partial Process Clean:${result.partialProcessCleaned ? "✓" : "✗"}`,
     `  No Terminal Hangs:    ${result.noTerminalHangs ? "✓" : "✗"}`,
     `  No Orphan Processes:  ${result.noOrphanProcesses ? "✓" : "✗"}`,
+    `  Confirmation Tier:    ${result.confirmationTier}`,
     `  CDP Connected:        ${result.cdpConnected ? "✓" : "✗"}`,
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
   ];

@@ -93,6 +93,7 @@ describe("formatSessionLoadingResult", () => {
       rendererLoaded: true,
       terminatedCleanly: true,
       noLinuxPathFailures: true,
+      confirmationTier: "cdp" as const,
       uiContentText: "Test",
       consoleMessages: [] as string[],
       stdout: "",
@@ -116,6 +117,7 @@ describe("formatSessionLoadingResult", () => {
       rendererLoaded: false,
       terminatedCleanly: true,
       noLinuxPathFailures: true,
+      confirmationTier: "inferred" as const,
       uiContentText: "",
       consoleMessages: [] as string[],
       stdout: "",
@@ -139,6 +141,7 @@ describe("formatPromptSubmissionResult", () => {
       unauthenticatedBlockedSafely: true,
       noPromptCrashes: true,
       authenticatedBlocked: true,
+      confirmationTier: "cdp" as const,
       cdpConnected: true,
       terminatedCleanly: true,
       noSecretsLogged: true,
@@ -164,7 +167,10 @@ describe("formatTerminalFlowResult", () => {
       terminalUiDetected: true,
       outputRendered: true,
       cancellationWorks: true,
+      cancellationTier: "blocked" as const,
       exitStatusReported: true,
+      exitStatusTier: "blocked" as const,
+      confirmationTier: "cdp" as const,
       noOrphanProcesses: true,
       cdpConnected: true,
       terminatedCleanly: true,
@@ -192,6 +198,7 @@ describe("formatSessionLifecycleResult", () => {
       terminatedCleanly: true,
       allStatesHandled: true,
       authenticatedBlocked: true,
+      confirmationTier: "process" as const,
       stateResults: [
         { stateName: "open-resume-session", stateVisible: true, crashedOrSilent: false, observedState: "Session list visible" },
         { stateName: "new-session", stateVisible: true, crashedOrSilent: false, observedState: "New session button visible" },
@@ -218,10 +225,11 @@ describe("formatPromptErrorResult", () => {
       cdpConnected: true,
       allErrorsVisible: true,
       noStaleWork: true,
+      confirmationTier: "process" as const,
       terminatedCleanly: true,
       errorStateResults: [
-        { stateName: "unauthenticated-prompt", errorVisible: true, staleWorkRemains: false, observedState: "Sign-in required" },
-        { stateName: "daemon-unavailable", errorVisible: true, staleWorkRemains: false, observedState: "Daemon error visible" },
+        { stateName: "unauthenticated-prompt", errorVisible: true, confirmationTier: "process" as const, staleWorkRemains: false, observedState: "Sign-in required" },
+        { stateName: "daemon-unavailable", errorVisible: true, confirmationTier: "process" as const, staleWorkRemains: false, observedState: "Daemon error visible" },
       ],
       stdout: "",
       stderr: "",
@@ -243,6 +251,7 @@ describe("formatWorkspacePickerResult", () => {
       workspaceOpened: true,
       uiTransitionedToWorkspace: true,
       noMacPathIssues: true,
+      confirmationTier: "cdp" as const,
       cdpConnected: true,
       terminatedCleanly: true,
       testWorkspacePath: "/tmp/test-workspace",
@@ -267,6 +276,7 @@ describe("formatTerminalBlockedResult", () => {
       partialProcessCleaned: true,
       noTerminalHangs: true,
       noOrphanProcesses: true,
+      confirmationTier: "process" as const,
       cdpConnected: true,
       terminatedCleanly: true,
       uiContentText: "",
@@ -440,8 +450,13 @@ describeIfAppAvailable("VAL-CROSS-007: File Browsing Works In A Linux Workspace"
 
   it("permission-denied paths are handled", () => {
     // The test creates a permission-denied directory; we verify the app
-    // didn't crash when the workspace was configured with this directory
-    expect(result!.permissionDeniedHandled || result!.startedCleanly).toBe(true);
+    // didn't crash when the workspace was configured with this directory.
+    // The permissionDeniedTier field indicates the evidence strength.
+    expect(result!.permissionDeniedHandled).toBe(true);
+    // Log the confirmation tier for visibility
+    if (result!.permissionDeniedTier === "inferred") {
+      console.log("  Note: permissionDeniedHandled is inferred (not directly observed)");
+    }
   });
 
   it("overall file browsing validation succeeds", () => {
@@ -716,7 +731,13 @@ describeIfAppAvailable("VAL-CROSS-017: Terminal Blocked States Are Visible", () 
   });
 
   it("terminal blocked states are visible", () => {
-    expect(result!.blockedStatesVisible || result!.startedCleanly).toBe(true);
+    expect(result!.blockedStatesVisible).toBe(true);
+    if (result!.confirmationTier === "survival") {
+      console.warn(
+        "Terminal blocked states confirmed only at survival-tier " +
+        "(app didn't crash, but no explicit blocked-state pattern found)."
+      );
+    }
     if (!result!.blockedStatesVisible) {
       console.warn(
         "Terminal blocked states not confirmed via CDP/process output. " +
