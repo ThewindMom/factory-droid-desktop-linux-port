@@ -483,6 +483,12 @@ export interface SessionLifecycleResult {
   startedCleanly: boolean;
   /** Whether CDP was connected */
   cdpConnected: boolean;
+  /**
+   * Number of CDP connection retries needed.
+   * 0 means first-attempt success; >0 indicates intermittent connection
+   * behavior that was recovered via retry.
+   */
+  cdpRetriesUsed: number;
   /** Whether the app terminated cleanly */
   terminatedCleanly: boolean;
   /** Whether all session lifecycle states are handled */
@@ -599,6 +605,15 @@ export interface WorkspacePickerResult {
   workspaceOpenedTier: ConfirmationTier;
   /** Whether UI transitioned to workspace context */
   uiTransitionedToWorkspace: boolean;
+  /**
+   * Confirmation tier for uiTransitionedToWorkspace evidence:
+   * - "cdp":         Workspace-specific UI elements detected via CDP page content
+   * - "process":     Workspace transition indicators found in process output
+   * - "survival":    App started without crash (weakest; no direct transition evidence)
+   * - "inferred":    No positive or negative evidence
+   * - "blocked":     Cannot be validated without direct UI automation
+   */
+  uiTransitionedTier: ConfirmationTier;
   /** Whether no macOS path issues */
   noMacPathIssues: boolean;
   /** Confirmation tier for the strongest evidence supporting this result */
@@ -817,6 +832,56 @@ async function connectCdp(
   } catch {
     return { connected: false, pages: [], pageContent: "" };
   }
+}
+
+/**
+ * Connect to CDP with retry logic for intermittent connection failures.
+ *
+ * CDP connections can fail intermittently under Xvfb because:
+ * - The Electron renderer may not have fully initialized when we attempt connection
+ * - The CDP port may experience transient ECONNREFUSED before the debugger is ready
+ * - xvfb-run wrapping can cause timing variability
+ *
+ * This wrapper retries the connection up to `maxRetries` times with a short
+ * delay between attempts. It is designed for session-lifecycle and other
+ * CDP-dependent validation where a single connection failure should not
+ * cause the entire test to fail.
+ *
+ * @param port - CDP port to connect to
+ * @param timeoutMs - Per-attempt timeout in ms
+ * @param maxRetries - Maximum number of retry attempts (default: 2)
+ * @param retryDelayMs - Delay between retries in ms (default: 2000)
+ * @returns CDP connection result from the last successful attempt, or the
+ *          final failure result if all attempts fail
+ */
+async function connectCdpWithRetry(
+  port: number,
+  timeoutMs: number,
+  maxRetries: number = 2,
+  retryDelayMs: number = 2_000
+): Promise<{
+  connected: boolean;
+  pages: Array<{ id: string; title: string; url: string; type: string }>;
+  pageContent: string;
+  retriesUsed: number;
+}> {
+  let lastResult = await connectCdp(port, timeoutMs);
+
+  if (lastResult.connected) {
+    return { ...lastResult, retriesUsed: 0 };
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Wait before retrying
+    await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+
+    lastResult = await connectCdp(port, timeoutMs);
+    if (lastResult.connected) {
+      return { ...lastResult, retriesUsed: attempt };
+    }
+  }
+
+  return { ...lastResult, retriesUsed: maxRetries };
 }
 
 /**
@@ -1849,6 +1914,7 @@ export async function validateSessionLifecycle(
 
   let startedCleanly = false;
   let cdpConnected = false;
+  let cdpRetriesUsed = 0;
   let terminatedCleanly = false;
   let allStatesHandled = false;
   const authenticatedBlocked = true; // Always true: no real credentials in automated tests
@@ -1879,6 +1945,7 @@ export async function validateSessionLifecycle(
     errors.push(`Executable not found: ${executablePath}`);
     return {
       success: false, startedCleanly: false, cdpConnected: false,
+      cdpRetriesUsed: 0,
       terminatedCleanly: false, allStatesHandled: false, authenticatedBlocked: true,
       confirmationTier: "inferred",
       stateResults: [], stdout: "", stderr: "", warnings, errors,
@@ -1899,8 +1966,18 @@ export async function validateSessionLifecycle(
     startedCleanly = waitForStartup(childProcess, startupTimeout);
 
     if (startedCleanly) {
-      const cdpResult = await connectCdp(cdpPort, cdpTimeout);
+      // Session lifecycle uses CDP with retry because CDP connections can fail
+      // intermittently under Xvfb when the renderer has not fully initialized
+      // by the time we attempt connection. Up to 2 retries with 2s delays.
+      const cdpResult = await connectCdpWithRetry(cdpPort, cdpTimeout);
       cdpConnected = cdpResult.connected;
+      cdpRetriesUsed = cdpResult.retriesUsed;
+      if (cdpResult.retriesUsed > 0) {
+        warnings.push(
+          `CDP connection required ${cdpResult.retriesUsed} retry(es) to succeed. ` +
+          `This is expected intermittent behavior under Xvfb.`
+        );
+      }
       const uiContent = cdpResult.connected ? cdpResult.pageContent : "";
 
       // Give the app time to attempt session operations
@@ -2040,7 +2117,7 @@ export async function validateSessionLifecycle(
   }
 
   return {
-    success, startedCleanly, cdpConnected, terminatedCleanly,
+    success, startedCleanly, cdpConnected, cdpRetriesUsed, terminatedCleanly,
     allStatesHandled, authenticatedBlocked, confirmationTier,
     stateResults, stdout, stderr, warnings, errors,
   };
@@ -2295,6 +2372,7 @@ export async function validateWorkspacePicker(
   let workspaceDirectEvidence = false;
   let workspaceOpenedTier: ConfirmationTier = "inferred";
   let uiTransitionedToWorkspace = false;
+  let uiTransitionedTier: ConfirmationTier = "inferred";
   let noMacPathIssues = true;
   let cdpConnected = false;
   let terminatedCleanly = false;
@@ -2330,7 +2408,7 @@ export async function validateWorkspacePicker(
     return {
       success: false, startedCleanly: false, pickerUiDetected: false,
       workspaceOpened: false, workspaceOpenedTier: "inferred",
-      uiTransitionedToWorkspace: false,
+      uiTransitionedToWorkspace: false, uiTransitionedTier: "inferred",
       noMacPathIssues: false, confirmationTier: "inferred",
       cdpConnected: false, terminatedCleanly: false,
       testWorkspacePath, uiContentText: "", stdout: "", stderr: "",
@@ -2393,8 +2471,14 @@ export async function validateWorkspacePicker(
         : (startedCleanly ? "survival" : "inferred");
 
       // Check for UI transition to workspace
-      // Only consider transition confirmed if we have direct evidence
+      // Only consider transition confirmed if we have direct evidence.
+      // uiTransitionedTier tracks the evidence strength separately from the
+      // boolean result, following the confirmation-tier pattern used by
+      // workspaceOpenedTier and other fields.
       uiTransitionedToWorkspace = workspaceDirectEvidence;
+      uiTransitionedTier = workspaceDirectEvidence
+        ? (cdpConnected && pickerUiDetected && !pickerUiDetectedViaProcess ? "cdp" : "process")
+        : (startedCleanly ? "survival" : "inferred");
 
       // Check for macOS path issues
       if (matchesAnyPattern(allOutput, MACOS_PATH_ERROR_PATTERNS)) {
@@ -2447,7 +2531,7 @@ export async function validateWorkspacePicker(
 
   return {
     success, startedCleanly, pickerUiDetected, workspaceOpened, workspaceOpenedTier,
-    uiTransitionedToWorkspace, noMacPathIssues, confirmationTier,
+    uiTransitionedToWorkspace, uiTransitionedTier, noMacPathIssues, confirmationTier,
     cdpConnected, terminatedCleanly,
     testWorkspacePath, uiContentText, stdout, stderr, warnings, errors,
   };
@@ -2769,6 +2853,7 @@ export function formatSessionLifecycleResult(result: SessionLifecycleResult): st
     `  Success:              ${result.success ? "✓" : "✗"}`,
     `  Started Cleanly:      ${result.startedCleanly ? "✓" : "✗"}`,
     `  CDP Connected:        ${result.cdpConnected ? "✓" : "✗"}`,
+    `  CDP Retries Used:     ${result.cdpRetriesUsed}`,
     `  Terminated Cleanly:   ${result.terminatedCleanly ? "✓" : "✗"}`,
     `  All States Handled:   ${result.allStatesHandled ? "✓" : "✗"}`,
     `  Authenticated Blocked:${result.authenticatedBlocked ? "✓" : "✗"}`,
@@ -2832,7 +2917,7 @@ export function formatWorkspacePickerResult(result: WorkspacePickerResult): stri
     `  Started Cleanly:        ${result.startedCleanly ? "✓" : "✗"}`,
     `  Picker UI Detected:     ${result.pickerUiDetected ? "✓" : "✗"}`,
     `  Workspace Opened:       ${result.workspaceOpened ? "✓" : "✗"} (tier: ${result.workspaceOpenedTier})`,
-    `  UI Transitioned:        ${result.uiTransitionedToWorkspace ? "✓" : "✗"}`,
+    `  UI Transitioned:        ${result.uiTransitionedToWorkspace ? "✓" : "✗"} (tier: ${result.uiTransitionedTier})`,
     `  No Mac Path Issues:     ${result.noMacPathIssues ? "✓" : "✗"}`,
     `  Confirmation Tier:      ${result.confirmationTier}`,
     `  CDP Connected:          ${result.cdpConnected ? "✓" : "✗"}`,

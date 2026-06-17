@@ -195,6 +195,7 @@ describe("formatSessionLifecycleResult", () => {
       success: true,
       startedCleanly: true,
       cdpConnected: true,
+      cdpRetriesUsed: 0,
       terminatedCleanly: true,
       allStatesHandled: true,
       authenticatedBlocked: true,
@@ -214,6 +215,26 @@ describe("formatSessionLifecycleResult", () => {
     expect(formatted).toContain("open-resume-session");
     expect(formatted).toContain("new-session");
     expect(formatted).toContain("session-error");
+  });
+
+  it("formats retry information when CDP required retries", () => {
+    const result = {
+      success: true,
+      startedCleanly: true,
+      cdpConnected: true,
+      cdpRetriesUsed: 2,
+      terminatedCleanly: true,
+      allStatesHandled: true,
+      authenticatedBlocked: true,
+      confirmationTier: "cdp" as const,
+      stateResults: [],
+      stdout: "",
+      stderr: "",
+      warnings: ["CDP connection required 2 retry(es) to succeed."],
+      errors: [],
+    };
+    const formatted = formatSessionLifecycleResult(result);
+    expect(formatted).toContain("CDP Retries Used:     2");
   });
 });
 
@@ -251,6 +272,7 @@ describe("formatWorkspacePickerResult", () => {
       workspaceOpened: true,
       workspaceOpenedTier: "cdp" as const,
       uiTransitionedToWorkspace: true,
+      uiTransitionedTier: "cdp" as const,
       noMacPathIssues: true,
       confirmationTier: "cdp" as const,
       cdpConnected: true,
@@ -265,6 +287,31 @@ describe("formatWorkspacePickerResult", () => {
     const formatted = formatWorkspacePickerResult(result);
     expect(formatted).toContain("VAL-CROSS-016");
     expect(formatted).toContain("/tmp/test-workspace");
+    expect(formatted).toContain("tier: cdp");
+  });
+
+  it("formats uiTransitionedTier at survival level", () => {
+    const result = {
+      success: true,
+      startedCleanly: true,
+      pickerUiDetected: false,
+      workspaceOpened: true,
+      workspaceOpenedTier: "survival" as const,
+      uiTransitionedToWorkspace: false,
+      uiTransitionedTier: "survival" as const,
+      noMacPathIssues: true,
+      confirmationTier: "survival" as const,
+      cdpConnected: false,
+      terminatedCleanly: true,
+      testWorkspacePath: "/tmp/test-workspace",
+      uiContentText: "",
+      stdout: "",
+      stderr: "",
+      warnings: [],
+      errors: [],
+    };
+    const formatted = formatWorkspacePickerResult(result);
+    expect(formatted).toContain("tier: survival");
   });
 });
 

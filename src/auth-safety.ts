@@ -432,14 +432,40 @@ async function connectCdp(
 }
 
 /**
- * Evaluate a JavaScript expression in the page context via CDP WebSocket.
+ * Evaluate a JavaScript expression in the page context via CDP.
  *
- * Uses the Chrome DevTools Protocol WebSocket connection to execute
- * JavaScript in the renderer page. This enables DOM-level inspection
- * for sign-in/login controls, which is stronger evidence than
- * page title/URL matching.
+ * Currently uses the HTTP `/json/evaluate` endpoint for simplicity.
+ * This endpoint is supported by some Electron versions but has known
+ * limitations:
  *
- * Falls back gracefully if WebSocket connection or evaluation fails.
+ * **Double-JSON encoding:** The `/json/evaluate` endpoint returns the
+ * JavaScript expression result as a JSON string. If the expression
+ * itself returns a string containing JSON (e.g., `JSON.stringify([...])`),
+ * the HTTP response body will be a JSON-encoded version of that string,
+ * leading to double-encoding. For example, an expression returning
+ * `'[{"a":1}]'` would produce the HTTP response `'"[{\\"a\\":1}]"'`.
+ *
+ * To handle this, this function attempts to unwrap one level of
+ * double-encoding when the raw response appears to be a JSON string
+ * wrapping another JSON value.
+ *
+ * **WebSocket CDP alternative:** Full Chrome DevTools Protocol evaluation
+ * via WebSocket (using `Runtime.evaluate`) would provide more reliable
+ * results with structured response objects, error details, and no
+ * double-encoding issues. However, this requires the `ws` npm package,
+ * which is not a current project dependency. Node.js 21+ provides a
+ * built-in `WebSocket` class, but the current target is Node 20.17.0.
+ *
+ * To add WebSocket-based CDP evaluation in the future:
+ * 1. Add `ws` as a dependency (or require Node 21+)
+ * 2. Connect to the page's `webSocketDebuggerUrl`
+ * 3. Send a `Runtime.evaluate` CDP command with the expression
+ * 4. Parse the structured `{result: {type, value, ...}}` response
+ *
+ * For now, the HTTP endpoint with double-JSON unwrapping is sufficient
+ * for login-control DOM queries, which return simple arrays of objects.
+ *
+ * Falls back gracefully if evaluation fails.
  */
 async function evaluateViaCdp(
   cdpPort: number,
@@ -447,7 +473,7 @@ async function evaluateViaCdp(
   timeoutMs: number = 5_000
 ): Promise<{ success: boolean; result?: unknown; error?: string }> {
   try {
-    // Get the WebSocket debugger URL
+    // Get the WebSocket debugger URL (used to confirm CDP is available)
     const pagesUrl = `http://127.0.0.1:${cdpPort}/json`;
     const pagesResponse = await new Promise<string>((resolve, reject) => {
       const req = http.get(pagesUrl, (res) => {
@@ -468,12 +494,10 @@ async function evaluateViaCdp(
       return { success: false, error: "No page with WebSocket URL available" };
     }
 
-    // WebSocket debugger URL is available but we use the simpler
-    // HTTP /json/evaluate endpoint instead, since the 'ws' package
-    // is not guaranteed to be installed.
-
-    // Attempt: Use the CDP HTTP endpoint for Runtime.evaluate
-    // Some Electron versions support /json/evaluate
+    // Use the HTTP /json/evaluate endpoint instead of WebSocket CDP,
+    // since the 'ws' package is not a current dependency and Node 20
+    // lacks a built-in WebSocket class. See function-level JSDoc for
+    // limitations and future WebSocket migration path.
     try {
       const evalUrl = `http://127.0.0.1:${cdpPort}/json/evaluate?expr=${encodeURIComponent(expression)}`;
       const evalResponse = await new Promise<string>((resolve, reject) => {
@@ -485,13 +509,61 @@ async function evaluateViaCdp(
         req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("CDP eval timeout")); });
         req.on("error", reject);
       });
-      return { success: true, result: evalResponse };
+
+      // Handle double-JSON encoding: /json/evaluate may return the result
+      // as a JSON string wrapping another JSON value. For example, if the
+      // expression returns '[{"selector":"button","text":"Sign in"}]', the
+      // HTTP response body could be '"[{\\"selector\\":\\"button\\",\\"text\\":\\"Sign in\\"}]"'.
+      // We detect this by checking if the raw response is a JSON string
+      // that, when parsed, yields another valid JSON value.
+      const unwrapped = unwrapDoubleJson(evalResponse);
+      return { success: true, result: unwrapped };
     } catch {
       // /json/evaluate not available; return failure
       return { success: false, error: "CDP /json/evaluate not available; full WebSocket CDP or WebdriverIO/Playwright needed for DOM inspection" };
     }
   } catch (err) {
     return { success: false, error: `CDP evaluate failed: ${String(err)}` };
+  }
+}
+
+/**
+ * Unwrap one level of double-JSON encoding from a /json/evaluate response.
+ *
+ * The /json/evaluate HTTP endpoint returns the JavaScript expression result
+ * as a JSON string. When the expression itself returns a string (e.g.,
+ * `JSON.stringify([...])`), the HTTP response body is a JSON-encoded version
+ * of that string, resulting in double-encoding.
+ *
+ * This function detects and unwraps one level of such double-encoding:
+ * - If the raw response parses to a string, and that string is itself
+ *   valid JSON (array or object), return the parsed inner value.
+ * - Otherwise, return the raw response unchanged.
+ *
+ * @param rawResponse - The raw HTTP response body from /json/evaluate
+ * @returns The unwrapped value, or the raw response if no double-encoding detected
+ */
+function unwrapDoubleJson(rawResponse: string): unknown {
+  try {
+    const parsed = JSON.parse(rawResponse);
+    // If the outer parse yields a string, try to parse it as inner JSON
+    if (typeof parsed === "string") {
+      try {
+        const inner = JSON.parse(parsed);
+        // Only unwrap if the inner value is a structured type (array/object)
+        // that would have been JSON.stringify'd by the expression
+        if (Array.isArray(inner) || (typeof inner === "object" && inner !== null)) {
+          return inner;
+        }
+      } catch {
+        // Inner parse failed; the string is not double-encoded JSON
+      }
+    }
+    // Not double-encoded; return the parsed outer value
+    return parsed;
+  } catch {
+    // Outer parse failed; return the raw string
+    return rawResponse;
   }
 }
 
@@ -544,26 +616,40 @@ async function queryLoginControlsViaCdp(
   const evalResult = await evaluateViaCdp(cdpPort, domQuery, timeoutMs);
 
   if (evalResult.success && evalResult.result !== undefined) {
-    try {
-      const parsed = JSON.parse(String(evalResult.result));
-      if (Array.isArray(parsed) && parsed.length > 0) {
+    // evaluateViaCdp now returns unwrapped values via unwrapDoubleJson,
+    // so the result may already be a parsed array/object. Try direct use
+    // first, then fall back to JSON.parse for backward compatibility.
+    let parsed: unknown;
+    if (Array.isArray(evalResult.result) || (typeof evalResult.result === "object" && evalResult.result !== null)) {
+      parsed = evalResult.result;
+    } else {
+      try {
+        parsed = JSON.parse(String(evalResult.result));
+      } catch {
+        // Parse failed; DOM query result was not JSON
         return {
-          loginControlsFound: true,
-          domInspectionTier: "dom",
-          controlDetails: parsed.map((c: { selector: string; text: string }) =>
-            `${c.selector}: "${c.text}"`
-          ),
+          loginControlsFound: false,
+          domInspectionTier: "cdp-title",
+          controlDetails: [],
+          error: "DOM evaluation result was not parseable JSON; CDP title/URL fallback in use",
         };
       }
-      // DOM query succeeded but found no matching controls
-      return {
-        loginControlsFound: false,
-        domInspectionTier: "dom",
-        controlDetails: [],
-      };
-    } catch {
-      // Parse failed; DOM query result was not JSON
     }
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return {
+        loginControlsFound: true,
+        domInspectionTier: "dom",
+        controlDetails: (parsed as Array<{ selector: string; text: string }>).map((c) =>
+          `${c.selector}: "${c.text}"`
+        ),
+      };
+    }
+    // DOM query succeeded but found no matching controls
+    return {
+      loginControlsFound: false,
+      domInspectionTier: "dom",
+      controlDetails: [],
+    };
   }
 
   // DOM evaluation not available; fall back to CDP title/URL inspection
