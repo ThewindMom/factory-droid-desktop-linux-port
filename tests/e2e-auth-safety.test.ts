@@ -33,6 +33,7 @@ import {
   formatDeepLinkCallbackResult,
   formatProtectedActionResult,
   formatLogSecretScanResult,
+  unwrapDoubleJson,
 } from "../src/auth-safety";
 
 // ─── Test constants ────────────────────────────────────────────────────────
@@ -657,4 +658,82 @@ describeIfAppAvailable("Auth safety test cleanup", () => {
       `(may include processes from other sessions)`
     );
   }, 10_000);
+});
+
+// ─── Unit tests for unwrapDoubleJson ─────────────────────────────────────
+
+describe("unwrapDoubleJson", () => {
+  it("unwraps double-encoded JSON array", () => {
+    const inner = '[{"selector":"button","text":"Sign in"}]';
+    const doubleEncoded = JSON.stringify(inner); // '"[{\\"selector\\":\\"button\\",\\"text\\":\\"Sign in\\"}]"'
+    const result = unwrapDoubleJson(doubleEncoded);
+    expect(result).toEqual([{ selector: "button", text: "Sign in" }]);
+  });
+
+  it("unwraps double-encoded JSON object", () => {
+    const inner = '{"key":"value"}';
+    const doubleEncoded = JSON.stringify(inner);
+    const result = unwrapDoubleJson(doubleEncoded);
+    expect(result).toEqual({ key: "value" });
+  });
+
+  it("returns parsed value when not double-encoded (plain JSON object)", () => {
+    const plain = '{"key":"value"}';
+    const result = unwrapDoubleJson(plain);
+    expect(result).toEqual({ key: "value" });
+  });
+
+  it("returns parsed value when not double-encoded (plain JSON array)", () => {
+    const plain = '[1,2,3]';
+    const result = unwrapDoubleJson(plain);
+    expect(result).toEqual([1, 2, 3]);
+  });
+
+  it("returns raw string when outer parse fails", () => {
+    const notJson = "not valid json at all";
+    const result = unwrapDoubleJson(notJson);
+    expect(result).toBe(notJson);
+  });
+
+  it("does not unwrap when inner value is a primitive string", () => {
+    // A double-encoded plain string like '"hello"' should return "hello",
+    // not try to parse "hello" as inner JSON (which would fail anyway)
+    const encoded = JSON.stringify("hello");
+    const result = unwrapDoubleJson(encoded);
+    expect(result).toBe("hello");
+  });
+
+  it("does not unwrap when inner value is a number", () => {
+    // A double-encoded number like '"42"' should return 42 (the parsed number),
+    // not attempt further unwrapping
+    const encoded = JSON.stringify("42");
+    const result = unwrapDoubleJson(encoded);
+    expect(result).toBe("42"); // parsed as string "42", inner parse yields number 42 which is not array/object
+  });
+
+  it("handles double-encoded nested structures", () => {
+    const inner = '{"items":[{"id":1}],"count":1}';
+    const doubleEncoded = JSON.stringify(inner);
+    const result = unwrapDoubleJson(doubleEncoded);
+    expect(result).toEqual({ items: [{ id: 1 }], count: 1 });
+  });
+
+  it("returns raw string for empty input", () => {
+    const result = unwrapDoubleJson("");
+    expect(result).toBe("");
+  });
+
+  it("handles double-encoded empty array", () => {
+    const inner = "[]";
+    const doubleEncoded = JSON.stringify(inner);
+    const result = unwrapDoubleJson(doubleEncoded);
+    expect(result).toEqual([]);
+  });
+
+  it("handles double-encoded empty object", () => {
+    const inner = "{}";
+    const doubleEncoded = JSON.stringify(inner);
+    const result = unwrapDoubleJson(doubleEncoded);
+    expect(result).toEqual({});
+  });
 });

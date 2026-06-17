@@ -287,7 +287,9 @@ describe("formatWorkspacePickerResult", () => {
     const formatted = formatWorkspacePickerResult(result);
     expect(formatted).toContain("VAL-CROSS-016");
     expect(formatted).toContain("/tmp/test-workspace");
-    expect(formatted).toContain("tier: cdp");
+    // Assert specific lines for each tier field, not ambiguous toContain("tier: cdp")
+    expect(formatted).toContain("Workspace Opened:       ✓ (tier: cdp)");
+    expect(formatted).toContain("UI Transitioned:        ✓ (tier: cdp)");
   });
 
   it("formats uiTransitionedTier at survival level", () => {
@@ -311,7 +313,9 @@ describe("formatWorkspacePickerResult", () => {
       errors: [],
     };
     const formatted = formatWorkspacePickerResult(result);
-    expect(formatted).toContain("tier: survival");
+    // Assert specific lines for each tier field, not ambiguous toContain("tier: survival")
+    expect(formatted).toContain("Workspace Opened:       ✓ (tier: survival)");
+    expect(formatted).toContain("UI Transitioned:        ✗ (tier: survival)");
   });
 });
 

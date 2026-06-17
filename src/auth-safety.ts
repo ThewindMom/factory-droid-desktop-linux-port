@@ -543,7 +543,7 @@ async function evaluateViaCdp(
  * @param rawResponse - The raw HTTP response body from /json/evaluate
  * @returns The unwrapped value, or the raw response if no double-encoding detected
  */
-function unwrapDoubleJson(rawResponse: string): unknown {
+export function unwrapDoubleJson(rawResponse: string): unknown {
   try {
     const parsed = JSON.parse(rawResponse);
     // If the outer parse yields a string, try to parse it as inner JSON
