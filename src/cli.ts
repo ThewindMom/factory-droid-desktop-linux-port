@@ -3302,4 +3302,329 @@ program
     }
   });
 
+/**
+ * `spt-diagnostics` subcommand: run sessions/prompts/terminal E2E validation
+ * harnesses for session loading, prompt submission, file browsing,
+ * terminal flow, session lifecycle, prompt errors, workspace picker,
+ * and terminal blocked states.
+ *
+ * Fulfills: VAL-CROSS-005, VAL-CROSS-006, VAL-CROSS-007, VAL-CROSS-008,
+ *           VAL-CROSS-014, VAL-CROSS-015, VAL-CROSS-016, VAL-CROSS-017
+ */
+program
+  .command("spt-diagnostics")
+  .description("Run sessions/prompts/terminal E2E validation harnesses for the assembled Linux app")
+  .option(
+    "--app-dir <path>",
+    "Path to the assembled Linux app directory (from assemble command)"
+  )
+  .option(
+    "--app-name <name>",
+    "Application name (default: factory-desktop)",
+    "factory-desktop"
+  )
+  .option(
+    "--sessions",
+    "Run session loading validation (VAL-CROSS-005)",
+    false
+  )
+  .option(
+    "--prompts",
+    "Run prompt submission validation (VAL-CROSS-006)",
+    false
+  )
+  .option(
+    "--file-browsing",
+    "Run file browsing validation (VAL-CROSS-007)",
+    false
+  )
+  .option(
+    "--terminal",
+    "Run terminal flow validation (VAL-CROSS-008)",
+    false
+  )
+  .option(
+    "--session-lifecycle",
+    "Run session lifecycle validation (VAL-CROSS-014)",
+    false
+  )
+  .option(
+    "--prompt-errors",
+    "Run prompt error/cancellation validation (VAL-CROSS-015)",
+    false
+  )
+  .option(
+    "--workspace-picker",
+    "Run workspace picker validation (VAL-CROSS-016)",
+    false
+  )
+  .option(
+    "--terminal-blocked",
+    "Run terminal blocked states validation (VAL-CROSS-017)",
+    false
+  )
+  .option(
+    "--all",
+    "Run all sessions/prompts/terminal diagnostics",
+    false
+  )
+  .option(
+    "--no-sandbox",
+    "Use --no-sandbox for Electron launch (default: true in CI)",
+    true
+  )
+  .option(
+    "--test-workspace-dir <path>",
+    "Test workspace directory for file browsing tests (created if not provided)"
+  )
+  .action(async (options) => {
+    const {
+      validateSessionLoading,
+      validatePromptSubmission,
+      validateFileBrowsing,
+      validateTerminalFlow,
+      validateSessionLifecycle,
+      validatePromptErrors,
+      validateWorkspacePicker,
+      validateTerminalBlocked,
+      cleanupStaleProcesses,
+      formatSessionLoadingResult,
+      formatPromptSubmissionResult,
+      formatFileBrowsingResult,
+      formatTerminalFlowResult,
+      formatSessionLifecycleResult,
+      formatPromptErrorResult,
+      formatWorkspacePickerResult,
+      formatTerminalBlockedResult,
+    } = await import("./sessions-prompts-terminal");
+
+    const runAll = options.all;
+    const appName = options.appName;
+
+    if (!options.appDir) {
+      process.stderr.write(
+        `⚠ --app-dir is required. Provide the path to the assembled Linux app directory.\n`
+      );
+      process.exit(1);
+    }
+
+    let hasErrors = false;
+
+    process.stdout.write(`\nSessions/Prompts/Terminal E2E Diagnostics\n`);
+    process.stdout.write(`  App dir: ${options.appDir}\n`);
+    process.stdout.write(`  App name: ${appName}\n`);
+    process.stdout.write(`  No-sandbox: ${options.noSandbox}\n\n`);
+
+    // ─── VAL-CROSS-005: Sessions Load ──────────────────────────────
+    if (runAll || options.sessions) {
+      process.stdout.write(`\n--- Validating session loading (VAL-CROSS-005) ---\n`);
+
+      const result = await validateSessionLoading({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatSessionLoadingResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Session loading validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-006: Prompt Submission ─────────────────────────────
+    if (runAll || options.prompts) {
+      process.stdout.write(`\n--- Validating prompt submission (VAL-CROSS-006) ---\n`);
+
+      const result = await validatePromptSubmission({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatPromptSubmissionResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Prompt submission validation failed.\n`
+        );
+      }
+
+      if (result.authenticatedBlocked) {
+        process.stdout.write(
+          `\nℹ Authenticated sub-behavior is BLOCKED: no real Factory credentials available.\n` +
+          `  Prompt UI was checked, but actual prompt submission could not be verified.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-007: File Browsing ────────────────────────────────
+    if (runAll || options.fileBrowsing) {
+      process.stdout.write(`\n--- Validating file browsing (VAL-CROSS-007) ---\n`);
+
+      const result = await validateFileBrowsing({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+        testWorkspaceDir: options.testWorkspaceDir,
+      });
+
+      process.stdout.write(`\n${formatFileBrowsingResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ File browsing validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-008: Terminal Flow ────────────────────────────────
+    if (runAll || options.terminal) {
+      process.stdout.write(`\n--- Validating terminal flow (VAL-CROSS-008) ---\n`);
+
+      const result = await validateTerminalFlow({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatTerminalFlowResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Terminal flow validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-014: Session Lifecycle ────────────────────────────
+    if (runAll || options.sessionLifecycle) {
+      process.stdout.write(`\n--- Validating session lifecycle (VAL-CROSS-014) ---\n`);
+
+      const result = await validateSessionLifecycle({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatSessionLifecycleResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Session lifecycle validation failed.\n`
+        );
+      }
+
+      if (result.authenticatedBlocked) {
+        process.stdout.write(
+          `\nℹ Authenticated sub-behavior is BLOCKED: no real Factory credentials available.\n` +
+          `  Session states were checked, but authenticated session operations could not be verified.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-015: Prompt Errors ────────────────────────────────
+    if (runAll || options.promptErrors) {
+      process.stdout.write(`\n--- Validating prompt errors and cancellation (VAL-CROSS-015) ---\n`);
+
+      const result = await validatePromptErrors({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatPromptErrorResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Prompt error validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-016: Workspace Picker ─────────────────────────────
+    if (runAll || options.workspacePicker) {
+      process.stdout.write(`\n--- Validating workspace picker (VAL-CROSS-016) ---\n`);
+
+      const result = await validateWorkspacePicker({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+        testWorkspaceDir: options.testWorkspaceDir,
+      });
+
+      process.stdout.write(`\n${formatWorkspacePickerResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Workspace picker validation failed.\n`
+        );
+      }
+    }
+
+    // ─── VAL-CROSS-017: Terminal Blocked ─────────────────────────────
+    if (runAll || options.terminalBlocked) {
+      process.stdout.write(`\n--- Validating terminal blocked states (VAL-CROSS-017) ---\n`);
+
+      const result = await validateTerminalBlocked({
+        appDir: options.appDir,
+        appName,
+        noSandbox: options.noSandbox,
+        startupTimeout: 30_000,
+        cdpTimeout: 8_000,
+      });
+
+      process.stdout.write(`\n${formatTerminalBlockedResult(result)}\n`);
+
+      if (!result.success) {
+        hasErrors = true;
+        process.stderr.write(
+          `\n✗ Terminal blocked states validation failed.\n`
+        );
+      }
+    }
+
+    // Cleanup stale processes
+    cleanupStaleProcesses();
+
+    // ─── Summary ──────────────────────────────────────────────────────
+    process.stdout.write(`\n--- Sessions/Prompts/Terminal E2E Diagnostics Summary ---\n`);
+    if (hasErrors) {
+      process.stderr.write(`\n✗ Some sessions/prompts/terminal validations failed. Review output above.\n`);
+      process.exit(1);
+    } else {
+      process.stdout.write(`\n✓ All sessions/prompts/terminal validations passed.\n`);
+
+      process.stdout.write(
+        `\nNote: Authenticated sub-behavior (prompt response with real credentials,\n` +
+        `session creation with real account, etc.) is marked as BLOCKED because real\n` +
+        `Factory credentials are not available to automated workers. Unauthenticated\n` +
+        `safe behavior has been validated per contract clarification.\n`
+      );
+    }
+  });
+
 program.parse();
