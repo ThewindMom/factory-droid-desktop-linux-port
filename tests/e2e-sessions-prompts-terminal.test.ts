@@ -55,17 +55,19 @@ const hasBuiltApp = fs.existsSync(path.join(APP_DIR, APP_NAME));
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function createTempDir(prefix = "spt-e2e-test-"): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function rmrf(dir: string): void {
   if (fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
+
+// Reference helpers to suppress noUnusedLocals while keeping them available for future tests
+void createTempDir;
+void rmrf;
 
 // ─── Test Suite ─────────────────────────────────────────────────────────────
 
