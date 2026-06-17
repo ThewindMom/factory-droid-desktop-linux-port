@@ -13,6 +13,10 @@ import * as crypto from "crypto";
 import { execSync } from "child_process";
 import { classifyBinary, BinaryType } from "./runtime-classifier";
 import { readAsarPackageMetadata, type AsarPackageMetadata } from "./asar-metadata";
+import {
+  patchDaemonTransport,
+  type DaemonTransportPatchResult,
+} from "./daemon-transport-patch";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +71,8 @@ export interface RuntimeAssemblyResult {
     valid: boolean;
     missingLibs: string[];
   };
+  /** Daemon transport patch result */
+  daemonTransportPatchResult: DaemonTransportPatchResult;
   /** Errors encountered during assembly */
   errors: string[];
   /** Warnings during assembly */
@@ -289,9 +295,9 @@ function computeFileHash(filePath: string): string {
  * VAL-RUNTIME-003: Ensures droid is executable Linux ELF
  * VAL-RUNTIME-016: Validates shared library dependencies
  */
-export function assembleLinuxRuntime(
+export async function assembleLinuxRuntime(
   options: RuntimeAssemblyOptions
-): RuntimeAssemblyResult {
+): Promise<RuntimeAssemblyResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -333,6 +339,16 @@ export function assembleLinuxRuntime(
       droidResult: { valid: false, path: "", isElf: false, isExecutable: false },
       layoutResult: { valid: false, isLinuxLayout: false, hasMacPaths: false },
       sharedLibResult: { valid: false, missingLibs: [] },
+      daemonTransportPatchResult: {
+        success: false,
+        patched: false,
+        originalHash: "",
+        patchedHash: "",
+        patchCount: 0,
+        patches: [],
+        errors: [],
+        warnings: [],
+      },
       errors,
       warnings,
     };
@@ -379,6 +395,27 @@ export function assembleLinuxRuntime(
     );
   }
 
+  // Step 4b: Patch daemon transport for Linux compatibility
+  // VAL-DAEMON-001: Linux app must not emit --listen ipc
+  // VAL-DAEMON-002: Daemon must reach healthy runtime state
+  const daemonTransportPatchResult = await patchDaemonTransport({
+    asarPath: destAsarPath,
+    tolerateMissingTarget: true,
+  });
+
+  if (!daemonTransportPatchResult.success) {
+    errors.push(
+      "Daemon transport patch failed: " +
+        daemonTransportPatchResult.errors.join("; ")
+    );
+  } else if (daemonTransportPatchResult.patched) {
+    warnings.push(
+      `Daemon transport patched: ${daemonTransportPatchResult.patches.map((p) => p.id).join(", ")}. ` +
+        `Asar hash changed from ${daemonTransportPatchResult.originalHash.substring(0, 12)}... ` +
+        `to ${daemonTransportPatchResult.patchedHash.substring(0, 12)}...`
+    );
+  }
+
   // Step 5: Copy droid binary to resources/bin/
   const binDir = path.join(resourcesDir, "bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -404,7 +441,11 @@ export function assembleLinuxRuntime(
 
   // Step 6: Validate the assembled app
   const layoutResult = validateRuntimeLayout(appDir, { appName: options.appName });
-  const asarResult = validateAsarIntact(appDir, options.asarHash);
+  const asarResult = validateAsarIntact(appDir, options.asarHash, {
+    additionalAllowedHashes: daemonTransportPatchResult.patched
+      ? [daemonTransportPatchResult.patchedHash]
+      : [],
+  });
   const droidResult = validateDroidBinary(appDir);
   const sharedLibResult = validateSharedLibraries(appDir, { appName: options.appName });
 
@@ -449,6 +490,7 @@ export function assembleLinuxRuntime(
       valid: sharedLibResult.valid,
       missingLibs: sharedLibResult.missingLibs,
     },
+    daemonTransportPatchResult,
     errors,
     warnings,
   };
@@ -615,6 +657,9 @@ export function validateAsarIntact(
     /** Expected product name (default: "Factory"). When set, a mismatch is an error.
      *  When unset/null, any non-placeholder productName is accepted. */
     expectedProductName?: string;
+    /** Additional allowed hashes (e.g., from daemon transport patching).
+     *  If the actual hash matches any in this list, hashMatch is true. */
+    additionalAllowedHashes?: string[];
   }
 ): AsarIntactResult {
   const errors: string[] = [];
@@ -636,7 +681,8 @@ export function validateAsarIntact(
 
   // Compute actual hash
   const actualHash = computeFileHash(asarPath);
-  const hashMatch = actualHash === expectedHash;
+  const additionalHashes = options?.additionalAllowedHashes ?? [];
+  const hashMatch = actualHash === expectedHash || additionalHashes.includes(actualHash);
 
   if (!hashMatch) {
     errors.push(

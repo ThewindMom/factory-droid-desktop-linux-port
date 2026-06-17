@@ -1346,7 +1346,7 @@ program
       tracker.track(outputDir, "Assembled Linux app");
 
       // Assemble the Linux Electron runtime
-      const result = assembleLinuxRuntime({
+      const result = await assembleLinuxRuntime({
         asarPath: options.asar,
         asarHash,
         droidPath: options.droid,
@@ -2798,7 +2798,7 @@ program
         validateSharedLibraries,
       } = await import("./runtime-assembly");
 
-      const assembleResult = assembleLinuxRuntime({
+      const assembleResult = await assembleLinuxRuntime({
         asarPath,
         asarHash,
         droidPath,
@@ -3625,6 +3625,123 @@ program
         `safe behavior has been validated per contract clarification.\n`
       );
     }
+  });
+
+/**
+ * `daemon-transport-diagnostics` subcommand: validate daemon transport
+ * compatibility for the assembled Linux app.
+ *
+ * Ensures the packaged app does not emit `--listen ipc` for the Linux
+ * droid daemon and that the daemon starts with supported flags.
+ *
+ * Fulfills: VAL-DAEMON-001, VAL-DAEMON-002
+ */
+program
+  .command("daemon-transport-diagnostics")
+  .description("Validate daemon transport compatibility for the assembled Linux app")
+  .option(
+    "--asar-path <path>",
+    "Path to the app.asar to validate"
+  )
+  .option(
+    "--droid-path <path>",
+    "Path to the Linux droid ELF binary (for --help check)"
+  )
+  .option(
+    "--app-dir <path>",
+    "Path to the assembled Linux app directory (auto-resolves asar and droid paths)"
+  )
+  .option(
+    "--patch",
+    "Also apply the daemon transport patch if not already patched",
+    false
+  )
+  .action(async (options: {
+    asarPath?: string;
+    droidPath?: string;
+    appDir?: string;
+    patch?: boolean;
+  }) => {
+    // Resolve paths from app-dir if provided
+    let asarPath = options.asarPath;
+    let droidPath = options.droidPath;
+
+    if (options.appDir) {
+      if (!asarPath) {
+        const candidate = path.join(options.appDir, "resources", "app.asar");
+        if (fs.existsSync(candidate)) {
+          asarPath = candidate;
+        }
+      }
+      if (!droidPath) {
+        const candidate = path.join(options.appDir, "resources", "bin", "droid");
+        if (fs.existsSync(candidate)) {
+          droidPath = candidate;
+        }
+      }
+    }
+
+    if (!asarPath) {
+      process.stderr.write(
+        "✗ --asar-path or --app-dir is required to locate app.asar.\n"
+      );
+      process.exit(1);
+    }
+
+    if (!fs.existsSync(asarPath)) {
+      process.stderr.write(`✗ app.asar not found: ${asarPath}\n`);
+      process.exit(1);
+    }
+
+    process.stdout.write(`\n--- Daemon Transport Diagnostics (VAL-DAEMON-001, VAL-DAEMON-002) ---\n`);
+    process.stdout.write(`  app.asar: ${asarPath}\n`);
+    if (droidPath) {
+      process.stdout.write(`  droid:    ${droidPath}\n`);
+    }
+
+    // Apply patch if requested
+    if (options.patch) {
+      process.stdout.write(`\nApplying daemon transport patch...\n`);
+      /* eslint-disable @typescript-eslint/no-var-requires */
+      const daemonPatchModule = require("./daemon-transport-patch") as typeof import("./daemon-transport-patch");
+      /* eslint-enable @typescript-eslint/no-var-requires */
+      const {
+        patchDaemonTransport: patchFn,
+        formatDaemonTransportPatchResult: formatPatch,
+      } = daemonPatchModule;
+      const patchResult = await patchFn({ asarPath });
+      process.stdout.write(formatPatch(patchResult) + "\n");
+
+      if (!patchResult.success) {
+        process.stderr.write(`\n✗ Daemon transport patch failed.\n`);
+        process.exit(1);
+      }
+    }
+
+    // Validate daemon transport compatibility
+    process.stdout.write(`\nValidating daemon transport compatibility...\n`);
+    /* eslint-disable @typescript-eslint/no-var-requires */
+    const daemonValidateModule = require("./daemon-transport-patch") as typeof import("./daemon-transport-patch");
+    /* eslint-enable @typescript-eslint/no-var-requires */
+    const {
+      validateDaemonTransport,
+      formatDaemonTransportValidationResult,
+    } = daemonValidateModule;
+    const result = validateDaemonTransport({ asarPath, droidPath });
+    process.stdout.write(formatDaemonTransportValidationResult(result) + "\n");
+
+    if (!result.valid) {
+      process.stderr.write(
+        `\n✗ Daemon transport validation FAILED. The app may emit unsupported ` +
+        `\`--listen ipc\` for the Linux droid daemon.\n`
+      );
+      process.exit(1);
+    }
+
+    process.stdout.write(
+      `\n✓ Daemon transport validation passed. The Linux app uses a ` +
+      `droid-supported daemon transport.\n`
+    );
   });
 
 program.parse();

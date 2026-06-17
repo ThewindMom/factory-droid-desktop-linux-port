@@ -717,7 +717,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -753,7 +753,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -779,7 +779,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -806,7 +806,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -836,7 +836,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -852,13 +852,13 @@ describe("assembleLinuxRuntime", () => {
     expect(layoutResult.hasMacPaths).toBe(false);
   });
 
-  it("fails when asar path does not exist", () => {
+  it("fails when asar path does not exist", async () => {
     const mockDist = createMockElectronDist(tempDir);
     const droidPath = createMockDroid(tempDir);
     const outputDir = path.join(tempDir, "build-output");
     fs.mkdirSync(outputDir, { recursive: true });
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath: "/nonexistent/app.asar",
       asarHash: "invalid",
       droidPath,
@@ -880,7 +880,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath: "/nonexistent/droid",
@@ -902,7 +902,7 @@ describe("assembleLinuxRuntime", () => {
 
     const asarHash = computeFileHash(asarPath);
 
-    const result = assembleLinuxRuntime({
+    const result = await assembleLinuxRuntime({
       asarPath,
       asarHash,
       droidPath,
@@ -943,6 +943,16 @@ describe("format functions", () => {
         hasMacPaths: false,
       },
       sharedLibResult: { valid: true, missingLibs: [] },
+      daemonTransportPatchResult: {
+        success: true,
+        patched: true,
+        originalHash: "abc123",
+        patchedHash: "def456",
+        patchCount: 2,
+        patches: [],
+        errors: [],
+        warnings: [],
+      },
       errors: [] as string[],
       warnings: [] as string[],
     };
