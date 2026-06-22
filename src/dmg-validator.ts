@@ -79,10 +79,19 @@ export function validateDmg(dmgPath: string): DmgValidationResult {
       timeout: 30000,
     });
   } catch (err) {
-    return {
-      valid: false,
-      error: `File is not a valid DMG archive: ${dmgPath} (${String(err)})`,
-    };
+    // 7z may exit non-zero (code 2) with warnings on some DMGs while still
+    // producing a valid listing on stdout. execSync captures stdout on the
+    // error object when stdio is "pipe". Check if we got usable content before
+    // declaring failure.
+    const stdout = (err as { stdout?: string })?.stdout;
+    if (stdout && stdout.includes("Factory.app")) {
+      listing = stdout;
+    } else {
+      return {
+        valid: false,
+        error: `File is not a valid DMG archive: ${dmgPath} (${String(err)})`,
+      };
+    }
   }
 
   // Factory Desktop DMGs contain "Factory.app" in their listing.

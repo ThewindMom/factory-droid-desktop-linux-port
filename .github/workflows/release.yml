@@ -65,13 +65,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          # Install 7zip (21.07) from universe — NOT p7zip-full (16.02).
-          # p7zip 16.02 cannot decompress LZFSE-compressed Apple DMGs; it
-          # lists only partition-level entries, not the HFS+ filesystem.
-          # 7-Zip >=21 added LZFSE support. The '7zip' package installs
-          # /usr/bin/7zz; symlink as '7z' for the builder's expectations.
-          sudo apt-get install -y dpkg-dev 7zip
-          sudo ln -sf /usr/bin/7zz /usr/local/bin/7z
+          sudo apt-get install -y dpkg-dev xz-utils
+          # Install 7-Zip 26.01 from 7-zip.org — NOT p7zip-full (16.02).
+          # p7zip 16.02 cannot decompress LZFSE-compressed Apple DMGs.
+          # The ubuntu 7zip package (21.07) has a Headers Error bug on
+          # Factory DMGs that causes exit code 2, so use the official binary.
+          curl -sfL "https://www.7-zip.org/a/7z2601-linux-x64.tar.xz" -o /tmp/7z.tar.xz
+          mkdir -p /tmp/7zip
+          tar xf /tmp/7z.tar.xz -C /tmp/7zip
+          sudo install -m755 /tmp/7zip/7zz /usr/local/bin/7zz
+          sudo ln -sf /usr/local/bin/7zz /usr/local/bin/7z
           7z | head -2
 
       - name: Install npm dependencies

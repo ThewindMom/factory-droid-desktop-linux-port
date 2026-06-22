@@ -258,18 +258,20 @@ releases.
 - Node.js `>=18` (Node 22 recommended for Electron 39)
 - npm
 - `7z` (**7-Zip >=21**, not p7zip-full 16.02 — modern Factory DMGs use LZFSE
-  compression which p7zip cannot decompress; on Debian/Ubuntu install the `7zip`
-  package, on other distros see [7-zip.org](https://www.7-zip.org/download.html)),
+  compression which p7zip cannot decompress; install from
+  [7-zip.org](https://www.7-zip.org/download.html)),
   `file`, `sha256sum`, `dpkg-deb`, `desktop-file-validate`, `xdg-mime`, `xvfb-run`
 - Rust (for building the updater — `make build-updater`)
 
 Install 7-Zip >=21 (Ubuntu 22.04's `p7zip-full` ships 16.02 which cannot
-handle LZFSE-compressed DMGs — install the `7zip` package instead, which
-ships 21.07):
+handle LZFSE-compressed DMGs; the `7zip` apt package 21.07 has a Headers
+Error bug on Factory DMGs — install the official 26.01 binary):
 
 ```bash
-sudo apt-get install -y 7zip
-sudo ln -sf /usr/bin/7zz /usr/local/bin/7z
+curl -sfL "https://www.7-zip.org/a/7z2601-linux-x64.tar.xz" -o /tmp/7z.tar.xz
+mkdir -p /tmp/7zip && tar xf /tmp/7z.tar.xz -C /tmp/7zip
+sudo install -m755 /tmp/7zip/7zz /usr/local/bin/7zz
+sudo ln -sf /usr/local/bin/7zz /usr/local/bin/7z
 ```
 
 Check your host:

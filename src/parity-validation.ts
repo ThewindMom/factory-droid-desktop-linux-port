@@ -78,10 +78,17 @@ export function validateArm64BeforeParity(
       };
     }
   } catch (err) {
-    return {
-      valid: false,
-      error: `Failed to inspect arm64 DMG contents: ${arm64DmgPath} (${String(err)})`,
-    };
+    // 7z may exit non-zero (code 2) with non-fatal warnings on some DMGs
+    // while still producing a valid listing on stdout.
+    const stdout = (err as { stdout?: string })?.stdout;
+    if (stdout && stdout.includes("app.asar")) {
+      // Listing is valid despite the non-zero exit — continue.
+    } else {
+      return {
+        valid: false,
+        error: `Failed to inspect arm64 DMG contents: ${arm64DmgPath} (${String(err)})`,
+      };
+    }
   }
 
   return arm64Result;

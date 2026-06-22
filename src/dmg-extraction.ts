@@ -99,6 +99,14 @@ export function extractFromDmg(
         timeout: 120000,
       });
     } catch (err) {
+      // 7z may exit non-zero (code 2) with non-fatal "Headers Error" warnings
+      // on some DMGs while still extracting the file successfully. Check if the
+      // file exists on disk before treating the error as fatal.
+      const extractedPath = path.join(outputDir, dmgPath_entry);
+      if (fs.existsSync(extractedPath)) {
+        // File was extracted despite the non-zero exit — continue.
+        continue;
+      }
       // Required paths: app.asar and the app's own Info.plist must exist.
       // The Electron Framework Info.plist is optional — some DMGs may not
       // include it, and we can fall back to ASAR devDependencies for the
