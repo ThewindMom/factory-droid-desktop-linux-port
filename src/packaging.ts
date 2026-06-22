@@ -411,8 +411,8 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     const result = spawnSync(cmd, [], {
       cwd: process.cwd(),
       shell: true,
-      stdio: "pipe",
-      timeout: 300000, // 5 minute timeout for packaging
+      stdio: "inherit",
+      timeout: 600000, // 10 minute timeout for packaging (deb+rpm can be slow)
       env: {
         ...process.env,
         // Prevent electron-builder from trying to publish
@@ -421,24 +421,19 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     });
 
     if (result.status !== 0) {
-      const stdout = result.stdout?.toString() || "";
-      const stderr = result.stderr?.toString() || "";
-
-      // electron-builder sometimes returns non-zero but still produces artifacts
-      // Check if artifacts were actually created
+      // With stdio: "inherit", output goes directly to the terminal.
+      // Check if artifacts were actually created despite non-zero exit.
       const foundArtifacts = findArtifacts(options.outputDir, validTargets, options);
 
       if (foundArtifacts.length > 0) {
         warnings.push(
-          `electron-builder exited with code ${result.status}, but artifacts were produced. ` +
-          `stderr: ${stderr.substring(0, 500)}`
+          `electron-builder exited with code ${result.status}, but artifacts were produced.`
         );
         artifacts.push(...foundArtifacts);
       } else {
         errors.push(
-          `electron-builder failed with exit code ${result.status}.\n` +
-          `stdout: ${stdout.substring(0, 1000)}\n` +
-          `stderr: ${stderr.substring(0, 1000)}`
+          `electron-builder failed with exit code ${result.status}. ` +
+          `See output above for details.`
         );
       }
     } else {
