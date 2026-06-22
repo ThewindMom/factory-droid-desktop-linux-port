@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 const APP_NAME: &str = "Factory Desktop";
 const DESKTOP_ENTRY: &str = "factory-desktop";
-const PACKAGED_BUNDLE_ICON_PATH: &str = "/opt/factory-desktop/.factory-linux/factory-desktop.png";
+const PACKAGED_BUNDLE_ICON_PATH: &str = "/opt/Factory/.factory-linux/factory-desktop.png";
 const SYSTEM_ICON_PATH: &str = "/usr/share/icons/hicolor/256x256/apps/factory-desktop.png";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

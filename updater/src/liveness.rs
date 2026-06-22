@@ -94,7 +94,7 @@ mod tests {
         let mut config = crate::config::RuntimeConfig::default_with_paths(
             &crate::config::RuntimePaths::detect()?,
         );
-        config.app_executable_path = PathBuf::from("/opt/factory-desktop/factory-desktop");
+        config.app_executable_path = PathBuf::from("/opt/Factory/factory-desktop");
 
         assert!(!process_matches(
             std::process::id(),
