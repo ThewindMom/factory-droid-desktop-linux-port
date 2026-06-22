@@ -106,11 +106,15 @@ jobs:
           VERSION=$(dpkg-deb --info "$DEB_PATH" | grep Version | awk '{print $2}')
           echo "FACTORY_VERSION=$VERSION" >> $GITHUB_ENV
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         run: |
-          gh release create "v$FACTORY_VERSION" \
-            --title "Factory Desktop $FACTORY_VERSION (Linux)" \
-            --notes "Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
+          if gh release view "v$FACTORY_VERSION" >/dev/null 2>&1; then
+            echo "Release v$FACTORY_VERSION already exists — updating asset."
+            gh release upload "v$FACTORY_VERSION" "$DEB_PATH" --clobber
+          else
+            gh release create "v$FACTORY_VERSION" \
+              --title "Factory Desktop $FACTORY_VERSION (Linux)" \
+              --notes "Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
 
           **Includes:**
           - Linux Electron runtime
@@ -130,7 +134,8 @@ jobs:
           \`\`\`
 
           Built by GitHub Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
-            "$DEB_PATH"
+              "$DEB_PATH"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

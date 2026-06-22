@@ -218,7 +218,7 @@ export async function patchWindowControls(
       patchedContent,
       TITLE_BAR_STYLE_REGEX,
       (_match, _prefix, varRef, _comma) => {
-        const overlayConfig = `{color:${electronAlias}.nativeTheme.shouldUseDarkColors?"#1e1e1e":"#e8e8e8",symbolColor:${electronAlias}.nativeTheme.shouldUseDarkColors?"#cccccc":"#333333",height:30}`;
+        const overlayConfig = `{color:"#1e1e1e",symbolColor:"#cccccc",height:30}`;
         return (
           `titleBarStyle:process.platform==="linux"?"hidden":(${varRef}?"default":"hidden"),` +
           `${PATCH_MARKER}titleBarOverlay:process.platform==="linux"?${overlayConfig}:void 0,`
