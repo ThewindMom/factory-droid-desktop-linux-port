@@ -44,9 +44,24 @@ make appimage
 AppImage builds and repo-only generated apps do not include the native-package
 updater.
 
-### From source (Nix flake — planned)
+### From source (Nix flake)
 
-Nix flake support is planned but not yet implemented.
+A `flake.nix` is included for NixOS and Nix users. It builds the package
+from the published `.deb` using `autoPatchelfHook`:
+
+```bash
+# Build the package
+nix build .#factory-desktop
+
+# Enter a development shell with all build tools
+nix develop
+
+# Install on NixOS (adds the NixOS module)
+nix profile install .#factory-desktop
+```
+
+The flake fetches the `.deb` from GitHub Releases. Update the `sha256`
+in `flake.nix` when the version changes (use `nix-prefetch-url`).
 
 ## Make Targets
 
@@ -317,10 +332,13 @@ node dist/cli.js check-tools
 Supported first-class targets:
 
 - Debian package (`.deb`) — primary
+- RPM package (`.rpm`) — for Fedora/RHEL/openSUSE
 - AppImage — local self-build
 
-RPM and pacman are not yet implemented; `make package` falls back to `deb` on
-non-Debian distros.
+Pacman (Arch Linux) is supported via a `PKGBUILD` template at
+`packaging/linux/PKGBUILD.template`, which wraps the `.deb` extraction.
+`make package` auto-detects the distro and builds the appropriate format;
+`make rpm` builds RPM directly.
 
 ## Build the Updater
 

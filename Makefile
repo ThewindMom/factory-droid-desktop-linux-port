@@ -8,6 +8,7 @@ APP_NAME := factory-desktop
 APP_DIR := $(CURDIR)/build/factory-desktop-linux-unpacked
 DIST_DIR := $(CURDIR)/dist
 DEB_GLOB := $(DIST_DIR)/$(APP_NAME)_*.deb
+RPM_GLOB := $(DIST_DIR)/$(APP_NAME)-*.rpm
 PACKAGE_WITH_UPDATER ?= 1
 UPDATER_BIN := $(CURDIR)/updater/target/release/factory-update-manager
 .DEFAULT_GOAL := help
@@ -28,15 +29,15 @@ if [ -z "$$format" ]; then \
 fi; \
 printf '%s\n' "$$format"
 
-.PHONY: help check test build-updater maybe-build-updater build-app package deb appimage install run-app service-enable service-status clean clean-dist clean-state
+.PHONY: help check test build-updater maybe-build-updater build-app package deb rpm appimage install run-app service-enable service-status clean clean-dist clean-state
 
 help:
 	@printf '\nFactory Desktop Linux Make Targets\n\n'
 	@printf '  %-22s %s\n' "make check" "Run cargo check for factory-update-manager"
 	@printf '  %-22s %s\n' "make test" "Run updater test suite"
 	@printf '  %-22s %s\n' "make build-updater" "Build factory-update-manager (release)"
-	@printf '  %-22s %s\n' "make build-app" "Build Linux app (auto-fetches DMG if --dmg omitted)"
 	@printf '  %-22s %s\n' "make deb" "Build .deb package into dist/"
+	@printf '  %-22s %s\n' "make rpm" "Build .rpm package into dist/"
 	@printf '  %-22s %s\n' "make appimage" "Build AppImage into dist/"
 	@printf '  %-22s %s\n' "make package" "Build native package (auto-detects format)"
 	@printf '  %-22s %s\n' "make install" "Install the latest native package"
@@ -47,8 +48,8 @@ help:
 	@printf '  %-22s %s\n' "make clean-state" "Remove updater runtime state"
 	@printf '\nVariables:\n\n'
 	@printf '  %-22s %s\n' "DMG=/path/file.dmg" "Override the DMG to build from"
-	@printf '  %-22s %s\n' "PACKAGE_WITH_UPDATER=0" "Build without the updater"
 	@printf '  %-22s %s\n' "DEB=/path/file.deb" "Override the .deb for make install"
+	@printf '  %-22s %s\n' "RPM=/path/file.rpm" "Override the .rpm for make install"
 	@printf '\nExamples:\n\n'
 	@printf '  %s\n' "make build-app"
 	@printf '  %s\n' "make build-app DMG=/tmp/Factory.dmg"
@@ -85,6 +86,9 @@ deb: maybe-build-updater
 	@echo "[make] Building Debian package"
 	node dist/cli.js package --app-dir "$(APP_DIR)" --output-dir "$(DIST_DIR)" --targets deb
 
+rpm: maybe-build-updater
+	@echo "[make] Building RPM package"
+	node dist/cli.js package --app-dir "$(APP_DIR)" --output-dir "$(DIST_DIR)" --targets rpm
 appimage:
 	@echo "[make] Building AppImage"
 	node dist/cli.js package --app-dir "$(APP_DIR)" --output-dir "$(DIST_DIR)" --targets appimage
@@ -92,8 +96,8 @@ appimage:
 package: maybe-build-updater
 	@echo "[make] Building native package (auto-detecting distro)"
 	@format="$$( $(NATIVE_PKG_FORMAT_CMD) )"; \
-	if [ "$$format" = "rpm" ] || [ "$$format" = "pacman" ]; then \
-		echo "[make] $$format is not yet supported. Falling back to deb." >&2; \
+	if [ "$$format" = "pacman" ]; then \
+		echo "[make] pacman is not yet supported by electron-builder. Falling back to deb." >&2; \
 		format="deb"; \
 	fi; \
 	if [ -z "$$format" ]; then \
@@ -106,10 +110,6 @@ package: maybe-build-updater
 install:
 	@echo "[make] Installing latest native package"
 	@format="$$( $(NATIVE_PKG_FORMAT_CMD) )"; \
-	if [ "$$format" = "rpm" ] || [ "$$format" = "pacman" ]; then \
-		echo "[make] $$format install not yet supported. Falling back to deb." >&2; \
-		format="deb"; \
-	fi; \
 	if [ -z "$$format" ]; then \
 		echo "[make] No supported package manager found. Falling back to deb." >&2; \
 		format="deb"; \
@@ -120,6 +120,16 @@ install:
 		echo "[make] Installing $$deb"; \
 		sudo dpkg -i "$$deb"; \
 		sudo apt-get install -f -y 2>/dev/null || true; \
+	elif [ "$$format" = "rpm" ]; then \
+		rpm="$${RPM:-$$(ls -1t $(RPM_GLOB) 2>/dev/null | head -1)}"; \
+		[ -n "$$rpm" ] || { echo "[make] No .rpm found. Run 'make rpm' first." >&2; exit 1; }; \
+		echo "[make] Installing $$rpm"; \
+		sudo rpm -Uvh "$$rpm"; \
+	elif [ "$$format" = "pacman" ]; then \
+		echo "[make] pacman install: use the PKGBUILD template in packaging/linux/" >&2; \
+		echo "[make]   cp packaging/linux/PKGBUILD.template /tmp/PKGBUILD" >&2; \
+		echo "[make]   (edit version + sha256, then: cd /tmp && makepkg -si)" >&2; \
+		exit 1; \
 	else \
 		echo "[make] Unsupported format: $$format" >&2; exit 1; \
 	fi
