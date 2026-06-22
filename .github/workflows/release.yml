@@ -121,11 +121,8 @@ jobs:
 
       - name: Create or update GitHub release
         run: |
-          if gh release view "v$FACTORY_VERSION" >/dev/null 2>&1; then
-            echo "Release v$FACTORY_VERSION already exists — updating asset and notes."
-            gh release upload "v$FACTORY_VERSION" "$DEB_PATH" --clobber
-            gh release edit "v$FACTORY_VERSION" \
-              --notes "Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
+          RELEASE_TAG="v$FACTORY_VERSION"
+          RELEASE_NOTES="Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
 
           **Includes:**
           - Linux Electron runtime
@@ -144,32 +141,29 @@ jobs:
           sudo apt-get install -f -y
           \`\`\`
 
-          Rebuilt by GitHub Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+          Built by GitHub Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists — updating asset, notes, and tag."
+            gh release upload "$RELEASE_TAG" "$DEB_PATH" --clobber
+            gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES"
           else
-            gh release create "v$FACTORY_VERSION" \
+            gh release create "$RELEASE_TAG" \
               --title "Factory Desktop $FACTORY_VERSION (Linux)" \
-              --notes "Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
-
-          **Includes:**
-          - Linux Electron runtime
-          - Droid CLI binary (from @factory/cli-linux-x64 npm)
-          - Version-agnostic asar patches:
-            - Daemon transport (force WebSocket on Linux)
-            - Auto-updater guard (disable Electron autoUpdater on Linux)
-            - Window controls (titleBarOverlay with dark-themed buttons)
-          - Rust auto-update manager (factory-update-manager)
-          - systemd --user service unit
-          - polkit policy
-
-          **Install:**
-          \`\`\`bash
-          sudo dpkg -i factory-desktop_${FACTORY_VERSION}_amd64.deb
-          sudo apt-get install -f -y
-          \`\`\`
-
-          Built by GitHub Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+              --notes "$RELEASE_NOTES" \
               "$DEB_PATH"
           fi
+
+          # Move the tag to the current commit via the GitHub API so
+          # GitHub doesn't show "N commits since this release" when
+          # the .deb was built from the latest code. On first create
+          # the tag is already at HEAD (no-op); on updates it moves
+          # the stale tag. Uses the API instead of git push because
+          # actions/checkout configures auth via extraheader which
+          # doesn't always work for pushes.
+          gh api "repos/${{ github.repository }}/git/refs/tags/$RELEASE_TAG" \
+            --method PATCH \
+            -f sha="$GITHUB_SHA" --silent || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
