@@ -9,6 +9,15 @@
 
 set -e
 
+# Set SUID bit on chrome-sandbox so the app launches normally
+# without --no-sandbox (VAL-RUNTIME-010). electron-builder strips
+# the SUID bit during packaging; it must be restored at install time.
+SANDBOX="/opt/Factory/chrome-sandbox"
+if [ -f "$SANDBOX" ]; then
+    chown root:root "$SANDBOX" 2>/dev/null || true
+    chmod 4755 "$SANDBOX" 2>/dev/null || true
+fi
+
 UNIT="factory-update-manager.service"
 
 # Reload the system daemon so the user unit is visible.
