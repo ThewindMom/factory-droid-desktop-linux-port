@@ -70,6 +70,7 @@ in `flake.nix` when the version changes (use `nix-prefetch-url`).
 | `make build-app` | Build Linux app (auto-fetches DMG from Factory if `--dmg` omitted) |
 | `make build-app DMG=/path` | Build from a specific DMG |
 | `make deb` | Build `.deb` package into `dist/` |
+| `make rpm` | Build `.rpm` package into `dist/` |
 | `make appimage` | Build AppImage into `dist/` |
 | `make package` | Build native package (auto-detects distro) |
 | `make install` | Install the latest native package |
@@ -87,8 +88,8 @@ Variables:
 | Variable | Description |
 |---|---|
 | `DMG=/path/file.dmg` | Override the DMG to build from |
-| `PACKAGE_WITH_UPDATER=0` | Build without the updater or service unit |
 | `DEB=/path/file.deb` | Override the `.deb` used by `make install` |
+| `RPM=/path/file.rpm` | Override the `.rpm` used by `make install` |
 
 ## Feature Matrix
 

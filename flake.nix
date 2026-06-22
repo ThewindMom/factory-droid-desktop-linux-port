@@ -47,7 +47,7 @@
             url = "https://github.com/ThewindMom/factory-desktop-linux/releases/download/v${factoryVersion}/factory-desktop_${factoryVersion}_amd64.deb";
             # Update this hash when the version changes:
             # nix-prefetch-url <url>
-            sha256 = pkgs.lib.fakeSha256;
+            sha256 = "tRCduIzqMEZmqqXmIADDBpw4lWliBGUOpZ0gneLCX+M=";
           };
 
           nativeBuildInputs = [ pkgs.dpkg pkgs.autoPatchelfHook ];
