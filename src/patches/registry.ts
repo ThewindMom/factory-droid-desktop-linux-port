@@ -17,8 +17,9 @@
  * assembly pipeline.
  */
 
-import type { DaemonTransportPatchResult, DaemonPatch } from "../daemon-transport-patch";
+import type { DaemonTransportPatchResult } from "../daemon-transport-patch";
 import { patchDaemonTransport } from "../daemon-transport-patch";
+import { patchAutoUpdater } from "../auto-updater-patch";
 
 // ─── Patch contract ────────────────────────────────────────────────────────
 
@@ -33,6 +34,14 @@ export interface PatchApplyOptions {
   tolerateMissingTarget?: boolean;
   /** Skip patching if already patched. Default: true. */
   skipIfPatched?: boolean;
+}
+
+/** Individual needle applied by a patch. */
+export interface PatchNeedle {
+  id: string;
+  description: string;
+  originalSnippet: string;
+  replacementSnippet: string;
 }
 
 /** Outcome of a single registered patch. */
@@ -50,7 +59,7 @@ export interface PatchOutcome {
   /** SHA-256 of the asar after this patch ran. */
   patchedHash: string;
   /** Individual needles applied by this patch. */
-  patches: DaemonPatch[];
+  patches: PatchNeedle[];
   /** Errors encountered by this patch. */
   errors: string[];
   /** Warnings emitted by this patch. */
@@ -82,7 +91,18 @@ export interface Patch {
   /** What this patch fixes and why. */
   description: string;
   /** Apply the patch to the asar. */
-  apply: (options: PatchApplyOptions) => Promise<DaemonTransportPatchResult>;
+  apply: (options: PatchApplyOptions) => Promise<GenericPatchResult>;
+}
+
+/** Fields common to all patch result types. */
+interface GenericPatchResult {
+  success: boolean;
+  patched: boolean;
+  originalHash: string;
+  patchedHash: string;
+  patchCount: number;
+  errors: string[];
+  warnings: string[];
 }
 
 // ─── Registered patches ─────────────────────────────────────────────────────
@@ -105,8 +125,29 @@ const daemonTransportPatch: Patch = {
     }),
 };
 
+/**
+ * The auto-updater patch guards Electron's built-in `autoUpdater` calls on
+ * Linux so the app doesn't try to check for or install macOS/Windows updates.
+ * Our Rust-based `factory-update-manager` handles Linux updates independently.
+ */
+const autoUpdaterPatch: Patch = {
+  id: "auto-updater",
+  description:
+    "Guard autoUpdater.checkForUpdates() and quitAndInstall() with " +
+    'process.platform!=="linux" to prevent built-in update crashes on Linux.',
+  apply: (options) =>
+    patchAutoUpdater({
+      asarPath: options.asarPath,
+      skipIfPatched: options.skipIfPatched,
+      tolerateMissingTarget: options.tolerateMissingTarget,
+    }),
+};
+
 /** All registered core patches, in apply order. */
-export const REGISTERED_PATCHES: ReadonlyArray<Patch> = [daemonTransportPatch];
+export const REGISTERED_PATCHES: ReadonlyArray<Patch> = [
+  daemonTransportPatch,
+  autoUpdaterPatch,
+];
 
 // ─── Registry entry point ───────────────────────────────────────────────────
 
@@ -118,7 +159,7 @@ export const REGISTERED_PATCHES: ReadonlyArray<Patch> = [daemonTransportPatch];
  * final hash for integrity validation.
  */
 export async function applyRegisteredPatches(
-  options: PatchApplyOptions
+  options: PatchApplyOptions,
 ): Promise<RegisteredPatchesResult> {
   const outcomes: PatchOutcome[] = [];
   const errors: string[] = [];
@@ -129,7 +170,7 @@ export async function applyRegisteredPatches(
   let finalHash = "";
 
   for (const patch of REGISTERED_PATCHES) {
-    const result: DaemonTransportPatchResult = await patch.apply(options);
+    const result: GenericPatchResult = await patch.apply(options);
 
     const outcome: PatchOutcome = {
       id: patch.id,
@@ -138,7 +179,7 @@ export async function applyRegisteredPatches(
       patched: result.patched,
       originalHash: result.originalHash,
       patchedHash: result.patchedHash,
-      patches: result.patches,
+      patches: (result as DaemonTransportPatchResult).patches ?? [],
       errors: result.errors,
       warnings: result.warnings,
     };
@@ -147,14 +188,14 @@ export async function applyRegisteredPatches(
     if (!outcome.success) {
       success = false;
       errors.push(
-        `Patch ${patch.id} failed: ${outcome.errors.join("; ")}`
+        `Patch ${patch.id} failed: ${outcome.errors.join("; ")}`,
       );
     } else if (outcome.patched) {
       patched = true;
       warnings.push(
         `Patch ${patch.id} applied: ${outcome.patches
           .map((p) => p.id)
-          .join(", ")}.`
+          .join(", ")}.`,
       );
     }
     warnings.push(...outcome.warnings);

@@ -4,6 +4,9 @@
  * Validates VAL-DAEMON-001 and VAL-DAEMON-002: The packaged Linux app
  * must not emit `--listen ipc` for the Linux droid daemon, and the
  * daemon must reach a healthy runtime state.
+ *
+ * Version-agnostic: tests verify the regex patterns match against both
+ * Factory 0.106.0 and 0.110.0 minified forms.
  */
 
 import {
@@ -11,51 +14,77 @@ import {
   validateDaemonTransport,
   formatDaemonTransportPatchResult,
   formatDaemonTransportValidationResult,
-  ORIGINAL_TRANSPORT_FUNCTION,
-  PATCHED_TRANSPORT_FUNCTION,
-  ORIGINAL_LISTEN_IPC_PUSH,
-  PATCHED_LISTEN_IPC_PUSH,
 } from "../src/daemon-transport-patch";
 
 import * as fs from "fs";
 
-// ─── Patch Constants ────────────────────────────────────────────────────────
+// ─── Minified code samples from real Factory Desktop asars ────────────────
 
-describe("daemon-transport-patch constants", () => {
-  it("ORIGINAL_TRANSPORT_FUNCTION contains nc.Ipc", () => {
-    expect(ORIGINAL_TRANSPORT_FUNCTION).toContain("nc.Ipc");
-    expect(ORIGINAL_TRANSPORT_FUNCTION).toContain("nc.WebSocket");
+/**
+ * Factory Desktop 0.106.0 transport resolver (minified).
+ * Function name: s9t, enum: nc, flag enum: Un, getter: qce, logger: X
+ */
+const TRANSPORT_0_106_0 =
+  'async function s9t(){const e=Un.DesktopDaemonIpc;try{return(await qce())[e.statsigName]??e.defaultValue?nc.Ipc:nc.WebSocket}catch(t){return X("[daemon] Failed to resolve desktop daemon IPC feature flag",{cause:t}),e.defaultValue?nc.Ipc:nc.WebSocket}}';
+
+/**
+ * Factory Desktop 0.110.0 transport resolver (minified).
+ * Function name: $$e, enum: Ms, flag enum: Zt, getter: dF, logger: G
+ */
+const TRANSPORT_0_110_0 =
+  'async function $$e(){const e=Zt.DesktopDaemonIpc;try{return(await dF())[e.statsigName]??e.defaultValue?Ms.Ipc:Ms.WebSocket}catch(t){return G("[daemon] Failed to resolve desktop daemon IPC feature flag",{cause:t}),e.defaultValue?Ms.Ipc:Ms.WebSocket}}';
+
+/**
+ * Factory Desktop 0.106.0 --listen ipc push (minified).
+ * Enum: nc
+ */
+const LISTEN_IPC_0_106_0 = 'if(t===nc.Ipc&&a.push("--listen","ipc")';
+
+/**
+ * Factory Desktop 0.110.0 --listen ipc push (minified).
+ * Enum: Ms
+ */
+const LISTEN_IPC_0_110_0 = 'if(t===Ms.Ipc&&a.push("--listen","ipc")';
+
+// ─── Version-agnostic regex matching ──────────────────────────────────────
+
+describe("daemon-transport-patch version-agnostic matching", () => {
+  describe("transport resolver pattern", () => {
+    it("matches Factory 0.106.0 minified form", () => {
+      const pattern =
+        /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
+      expect(TRANSPORT_0_106_0).toMatch(pattern);
+    });
+
+    it("matches Factory 0.110.0 minified form", () => {
+      const pattern =
+        /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
+      expect(TRANSPORT_0_110_0).toMatch(pattern);
+    });
+
+    it("extracts WebSocket enum reference from 0.106.0", () => {
+      const pattern = /(\w+\.WebSocket)/;
+      const match = TRANSPORT_0_106_0.match(pattern);
+      expect(match?.[1]).toBe("nc.WebSocket");
+    });
+
+    it("extracts WebSocket enum reference from 0.110.0", () => {
+      const pattern = /(\w+\.WebSocket)/;
+      const match = TRANSPORT_0_110_0.match(pattern);
+      expect(match?.[1]).toBe("Ms.WebSocket");
+    });
   });
 
-  it("PATCHED_TRANSPORT_FUNCTION forces WebSocket on Linux", () => {
-    expect(PATCHED_TRANSPORT_FUNCTION).toContain(
-      'process.platform==="linux")return nc.WebSocket'
-    );
-    expect(PATCHED_TRANSPORT_FUNCTION).toContain("nc.Ipc");
-  });
+  describe("--listen ipc push pattern", () => {
+    it("matches Factory 0.106.0 form", () => {
+      const pattern = /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+      expect(LISTEN_IPC_0_106_0).toMatch(pattern);
+    });
 
-  it("ORIGINAL_LISTEN_IPC_PUSH contains --listen ipc", () => {
-    expect(ORIGINAL_LISTEN_IPC_PUSH).toContain("--listen");
-    expect(ORIGINAL_LISTEN_IPC_PUSH).toContain("ipc");
-  });
-
-  it("PATCHED_LISTEN_IPC_PUSH adds Linux guard", () => {
-    expect(PATCHED_LISTEN_IPC_PUSH).toContain(
-      'process.platform!=="linux"'
-    );
-    expect(PATCHED_LISTEN_IPC_PUSH).toContain("--listen");
-  });
-
-  it("patched function is longer than original (adds Linux guard)", () => {
-    expect(PATCHED_TRANSPORT_FUNCTION.length).toBeGreaterThan(
-      ORIGINAL_TRANSPORT_FUNCTION.length
-    );
-  });
-
-  it("patched listen push is longer than original (adds Linux guard)", () => {
-    expect(PATCHED_LISTEN_IPC_PUSH.length).toBeGreaterThan(
-      ORIGINAL_LISTEN_IPC_PUSH.length
-    );
+    it("matches Factory 0.110.0 form", () => {
+      const pattern = /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+      expect(LISTEN_IPC_0_110_0).toMatch(pattern);
+    });
   });
 });
 
@@ -70,7 +99,7 @@ describe("patchDaemonTransport", () => {
     expect(result.success).toBe(false);
     expect(result.patched).toBe(false);
     expect(result.errors).toEqual(
-      expect.arrayContaining([expect.stringContaining("not found")])
+      expect.arrayContaining([expect.stringContaining("not found")]),
     );
   });
 
@@ -116,7 +145,7 @@ describe("patchDaemonTransport", () => {
   });
 });
 
-// ─── validateDaemonTransport ────────────────────────────────────────────────
+// ─── validateDaemonTransport ───────────────────────────────────────────────
 
 describe("validateDaemonTransport", () => {
   it("returns error when asar not found", () => {
@@ -127,7 +156,7 @@ describe("validateDaemonTransport", () => {
     expect(result.valid).toBe(false);
     expect(result.forcesWebSocketOnLinux).toBe(false);
     expect(result.errors).toEqual(
-      expect.arrayContaining([expect.stringContaining("not found")])
+      expect.arrayContaining([expect.stringContaining("not found")]),
     );
   });
 

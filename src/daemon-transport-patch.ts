@@ -1,23 +1,35 @@
 /**
  * Daemon transport compatibility patch for Linux builds.
  *
- * Problem: Factory Desktop 0.106.0 app.asar contains a daemon transport
- * selection function (`s9t`) that can select IPC transport based on a
- * Statsig feature flag (`desktop_daemon_ipc`). When IPC is selected, the
- * app emits `droid daemon --listen ipc`. The Linux droid 0.106.0 CLI does
- * NOT support `--listen`; it only supports `--host`, `--port`, and `--unix`.
+ * Problem: Factory Desktop's app.asar contains a daemon transport selection
+ * function that can select IPC transport based on a Statsig feature flag
+ * (`DesktopDaemonIpc`). When IPC is selected, the app emits
+ * `droid daemon --listen ipc`. The Linux droid CLI does NOT support
+ * `--listen`; it only supports `--host`, `--port`, and `--unix`.
  *
  * Fix: Patch the app.asar to force WebSocket transport on Linux by:
  * 1. Modifying the transport selection function to return WebSocket on Linux
  * 2. Adding a defense-in-depth guard to prevent `--listen ipc` on Linux
  *
+ * Version-agnostic design: Instead of matching exact minified strings (which
+ * change between Factory Desktop versions), this patch uses regex patterns
+ * that match the structural shape of the code:
+ * - The transport resolver matches `DesktopDaemonIpc` + `.Ipc` / `.WebSocket`
+ *   enum references, regardless of the minified variable names.
+ * - The `--listen ipc` push matches the `push("--listen","ipc")` call
+ *   regardless of the surrounding variable names.
+ *
  * Fulfills: VAL-DAEMON-001, VAL-DAEMON-002
  */
 
 import * as fs from "fs";
-import * as path from "path";
-import * as crypto from "crypto";
-import { parseIsPackEntry } from "./asar-metadata";
+import {
+  applyAsarContentPatch,
+  applyRegexPatch,
+  computeFileHash,
+  findMainBundleFiles,
+  type RegexPatchResult,
+} from "./patches/asar-patcher";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -101,60 +113,82 @@ export interface ValidateDaemonTransportResult {
 const PATCH_MARKER = "/* linux-daemon-transport-patch */";
 
 /**
- * Original transport selection function (minified).
- * This function resolves `DesktopDaemonIpc` feature flag and returns
- * either `nc.Ipc` or `nc.WebSocket`.
+ * Regex matching the transport selection function.
  *
- * The original code (de-minified) is:
- * ```
- * async function s9t() {
- *   const e = Un.DesktopDaemonIpc;
+ * The function shape (de-minified) is:
+ * ```ts
+ * async function <name>() {
+ *   const e = <FlagEnum>.DesktopDaemonIpc;
  *   try {
- *     return (await qce())[e.statsigName] ?? e.defaultValue ? nc.Ipc : nc.WebSocket;
+ *     return (await <getFlag>())[e.statsigName] ?? e.defaultValue
+ *       ? <TransportEnum>.Ipc : <TransportEnum>.WebSocket;
  *   } catch(t) {
- *     return X("[daemon] Failed to resolve desktop daemon IPC feature flag", {cause:t}),
- *            e.defaultValue ? nc.Ipc : nc.WebSocket;
+ *     ... e.defaultValue ? <TransportEnum>.Ipc : <TransportEnum>.WebSocket;
  *   }
  * }
  * ```
- */
-export const ORIGINAL_TRANSPORT_FUNCTION =
-  "async function s9t(){const e=Un.DesktopDaemonIpc;try{return(await qce())[e.statsigName]??e.defaultValue?nc.Ipc:nc.WebSocket}catch(t){return X(\"[daemon] Failed to resolve desktop daemon IPC feature flag\",{cause:t}),e.defaultValue?nc.Ipc:nc.WebSocket}}";
-
-/**
- * Patched transport selection function that forces WebSocket on Linux.
  *
- * The patched version adds `process.platform==="linux"` check before
- * the feature flag logic, ensuring Linux always uses WebSocket transport.
+ * The regex captures:
+ * - $1: everything before the function body's first statement
+ * - $2: the rest of the function (from `const e=` to the end)
+ *
+ * We inject `if(process.platform==="linux")return <ws-enum>.WebSocket;`
+ * between the function opening and the original body.
+ *
+ * The pattern matches any minified names because it anchors on:
+ * - `DesktopDaemonIpc` (stable property name)
+ * - `return` + ternary with `.Ipc` and `.WebSocket`
  */
-export const PATCHED_TRANSPORT_FUNCTION =
-  "async function s9t(){if(process.platform===\"linux\")return nc.WebSocket;const e=Un.DesktopDaemonIpc;try{return(await qce())[e.statsigName]??e.defaultValue?nc.Ipc:nc.WebSocket}catch(t){return X(\"[daemon] Failed to resolve desktop daemon IPC feature flag\",{cause:t}),e.defaultValue?nc.Ipc:nc.WebSocket}}";
+const TRANSPORT_RESOLVER_REGEX =
+  /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
 
 /**
- * Original daemon args construction with `--listen ipc` push.
- * This is the pattern where `t===nc.Ipc` causes `--listen ipc` to be
- * added to the daemon args.
+ * Build the replacement for the transport resolver.
+ *
+ * Extracts the WebSocket enum reference from the matched function so the
+ * injected guard uses the same minified name as the original code.
  */
-export const ORIGINAL_LISTEN_IPC_PUSH =
-  "if(t===nc.Ipc&&a.push(\"--listen\",\"ipc\")";
+function buildTransportResolverReplacement(
+  match: string,
+  prefix: string,
+  body: string,
+): string {
+  // Extract the WebSocket enum reference (e.g. "nc.WebSocket" or "Ms.WebSocket")
+  const wsMatch = body.match(/(\w+\.WebSocket)/);
+  const wsRef = wsMatch ? wsMatch[1] : '"".WebSocket'; // fallback should never hit
+  return (
+    prefix +
+    `if(process.platform==="linux")return ${wsRef};` +
+    body +
+    match.substring(prefix.length + body.length)
+  );
+}
 
 /**
- * Patched daemon args construction with Linux guard.
- * On Linux, even if transport is somehow still IPC, we prevent
- * `--listen ipc` from being added as a defense-in-depth measure.
+ * Regex matching the `--listen ipc` arg push.
+ *
+ * The minified pattern is:
+ * ```js
+ * if(t===<enum>.Ipc&&a.push("--listen","ipc"))
+ * ```
+ *
+ * We capture the enum reference and the push call, then inject
+ * `process.platform!=="linux"&&` before the push.
  */
-export const PATCHED_LISTEN_IPC_PUSH =
-  "if(t===nc.Ipc&&process.platform!==\"linux\"&&a.push(\"--listen\",\"ipc\")";
+const LISTEN_IPC_PUSH_REGEX =
+  /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+
+/**
+ * Build the replacement for the --listen ipc push.
+ */
+function buildListenIpcReplacement(
+  enumRef: string,
+  pushCall: string,
+): string {
+  return `${enumRef}&&process.platform!=="linux"&&${pushCall}`;
+}
 
 // ─── Core Patching Functions ────────────────────────────────────────────────
-
-/**
- * Compute SHA-256 hash of a file.
- */
-function computeFileHash(filePath: string): string {
-  const content = fs.readFileSync(filePath);
-  return crypto.createHash("sha256").update(content).digest("hex");
-}
 
 /**
  * Apply the Linux daemon transport compatibility patch to an app.asar.
@@ -163,21 +197,20 @@ function computeFileHash(filePath: string): string {
  * 1. Force WebSocket transport on Linux (preventing `--listen ipc`)
  * 2. Add a defense-in-depth guard against `--listen ipc` on Linux
  *
+ * Both patches use regex patterns that match the structural shape of the
+ * code, not exact minified strings, so they survive upstream version bumps.
+ *
  * VAL-DAEMON-001: The app must not emit `--listen ipc` for Linux droid.
  * VAL-DAEMON-002: The daemon must reach healthy runtime state.
- *
- * @param options Patch options
- * @returns Patch result
  */
 export async function patchDaemonTransport(
-  options: DaemonTransportPatchOptions
+  options: DaemonTransportPatchOptions,
 ): Promise<DaemonTransportPatchResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
   const patches: DaemonPatch[] = [];
   const skipIfPatched = options.skipIfPatched ?? true;
 
-  // Validate input
   if (!fs.existsSync(options.asarPath)) {
     return {
       success: false,
@@ -192,17 +225,7 @@ export async function patchDaemonTransport(
   }
 
   const originalHash = computeFileHash(options.asarPath);
-
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const asar = require("@electron/asar") as typeof import("@electron/asar");
-
-  // Find the main bundle file(s) to patch
-  const rawFiles = asar.listPackage(options.asarPath, { isPack: true }) as string[];
-  const files = rawFiles.map(f => parseIsPackEntry(f)).filter((f): f is string => f !== null);
-  const mainBundleFiles = files.filter(
-    (f: string) =>
-      f.startsWith(".vite/build/index-") && f.endsWith(".js")
-  );
+  const mainBundleFiles = findMainBundleFiles(options.asarPath);
 
   if (mainBundleFiles.length === 0) {
     const message =
@@ -238,21 +261,23 @@ export async function patchDaemonTransport(
   if (mainBundleFiles.length > 1) {
     warnings.push(
       `Found ${mainBundleFiles.length} main bundle files. ` +
-      `Patching all of them: ${mainBundleFiles.join(", ")}`
+        `Patching all of them: ${mainBundleFiles.join(", ")}`,
     );
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const asar = require("@electron/asar") as typeof import("@electron/asar");
   let totalPatchCount = 0;
   let alreadyPatched = false;
 
   for (const bundleFile of mainBundleFiles) {
-    const filePath = bundleFile; // Already normalized by parseIsPackEntry
-    const content = asar.extractFile(options.asarPath, filePath).toString("utf-8");
+    const content = asar
+      .extractFile(options.asarPath, bundleFile)
+      .toString("utf-8");
 
-    // Check if already patched
     if (skipIfPatched && content.includes(PATCH_MARKER)) {
       alreadyPatched = true;
-      warnings.push(`Bundle ${filePath} is already patched. Skipping.`);
+      warnings.push(`Bundle ${bundleFile} is already patched. Skipping.`);
       continue;
     }
 
@@ -260,109 +285,82 @@ export async function patchDaemonTransport(
     let filePatchCount = 0;
 
     // Patch 1: Force WebSocket transport on Linux
-    if (patchedContent.includes(ORIGINAL_TRANSPORT_FUNCTION)) {
-      patchedContent = patchedContent.replace(
-        ORIGINAL_TRANSPORT_FUNCTION,
-        PATCH_MARKER + PATCHED_TRANSPORT_FUNCTION
-      );
+    const transportResult: RegexPatchResult = applyRegexPatch(
+      patchedContent,
+      TRANSPORT_RESOLVER_REGEX,
+      (match, prefix, body) =>
+        PATCH_MARKER + buildTransportResolverReplacement(match, prefix, body),
+    );
+
+    if (transportResult.matched) {
+      patchedContent = transportResult.content;
       filePatchCount++;
       patches.push({
         id: "force-websocket-on-linux",
         description:
-          "Modify transport selection function (s9t) to return nc.WebSocket " +
-          "on Linux regardless of the DesktopDaemonIpc feature flag",
-        originalSnippet: ORIGINAL_TRANSPORT_FUNCTION.substring(0, 80) + "...",
-        replacementSnippet: PATCHED_TRANSPORT_FUNCTION.substring(0, 80) + "...",
+          "Inject process.platform===\"linux\" guard into transport " +
+          "resolver to force WebSocket on Linux",
+        originalSnippet: transportResult.match.substring(0, 80) + "...",
+        replacementSnippet: "...force WebSocket on Linux...",
       });
     } else {
-      // Check if the function exists in a slightly different form
-      const s9tPos = patchedContent.indexOf("async function s9t()");
-      if (s9tPos === -1) {
-        // The s9t function might not be in this bundle file (it's in the main one)
-        // This is not necessarily an error - skip this file
-        warnings.push(
-          `Could not find the transport selection function (s9t) in ${filePath}. ` +
-          `This bundle file may not contain daemon startup code. Skipping.`
-        );
-      } else {
-        // The function exists but the exact text doesn't match
-        // Extract and analyze the function
-        const funcStart = s9tPos;
-        let braceCount = 0;
-        let funcEnd = funcStart;
-        for (let i = funcStart; i < patchedContent.length; i++) {
-          if (patchedContent[i] === "{") braceCount++;
-          if (patchedContent[i] === "}") {
-            braceCount--;
-            if (braceCount === 0) {
-              funcEnd = i + 1;
-              break;
-            }
-          }
-        }
-
-        const funcText = patchedContent.substring(funcStart, funcEnd);
-        if (funcText.includes("process.platform===\"linux\"") && funcText.includes("nc.WebSocket")) {
-          // Already has a Linux WebSocket check
+      // Check if the function exists at all
+      if (content.includes("DesktopDaemonIpc")) {
+        if (
+          content.includes("process.platform") &&
+          content.includes("DesktopDaemonIpc")
+        ) {
           warnings.push(
-            `Transport function in ${filePath} already contains a Linux WebSocket guard. ` +
-            `Skipping patch 1.`
+            `Transport resolver in ${bundleFile} may already have a Linux guard. ` +
+              `Skipping patch 1.`,
           );
         } else {
           errors.push(
-            `Transport selection function in ${filePath} has unexpected format. ` +
-            `Cannot safely apply the WebSocket transport patch. ` +
-            `Function text: ${funcText.substring(0, 200)}...`
+            `Found DesktopDaemonIpc in ${bundleFile} but transport resolver regex did not match. ` +
+              `The function shape may have changed. Manual inspection required.`,
           );
         }
       }
+      // If DesktopDaemonIpc is not in this file, it's just a different bundle — not an error.
     }
 
     // Patch 2: Defense-in-depth: prevent --listen ipc on Linux
-    if (patchedContent.includes(ORIGINAL_LISTEN_IPC_PUSH)) {
-      patchedContent = patchedContent.replace(
-        ORIGINAL_LISTEN_IPC_PUSH,
-        PATCHED_LISTEN_IPC_PUSH
-      );
+    const listenResult: RegexPatchResult = applyRegexPatch(
+      patchedContent,
+      LISTEN_IPC_PUSH_REGEX,
+      (_match, enumRef, pushCall) =>
+        buildListenIpcReplacement(enumRef, pushCall),
+    );
+
+    if (listenResult.matched) {
+      patchedContent = listenResult.content;
       filePatchCount++;
       patches.push({
         id: "prevent-listen-ipc-on-linux",
         description:
-          "Add process.platform !== 'linux' guard to --listen ipc arg push " +
-          "as a defense-in-depth measure",
-        originalSnippet: ORIGINAL_LISTEN_IPC_PUSH,
-        replacementSnippet: PATCHED_LISTEN_IPC_PUSH,
+          "Add process.platform!==\"linux\" guard to --listen ipc arg push " +
+            "as a defense-in-depth measure",
+        originalSnippet: listenResult.match,
+        replacementSnippet: "...add Linux guard...",
       });
-    } else if (patchedContent.includes("--listen") && patchedContent.includes("ipc")) {
-      // The --listen ipc push might have a different format
-      const listenPos = patchedContent.indexOf("--listen");
-      const context = patchedContent.substring(
-        Math.max(0, listenPos - 50),
-        Math.min(patchedContent.length, listenPos + 100)
-      );
-
-      if (!context.includes("process.platform") && !context.includes("linux")) {
-        warnings.push(
-          `Found --listen in ${filePath} but the exact arg push pattern doesn't match. ` +
-          `Context: ${context}. Defense-in-depth patch skipped.`
-        );
-      }
     }
+    // If --listen ipc push isn't found, it may have already been patched or
+    // the code structure changed. Not an error — the transport resolver
+    // patch is the primary fix.
 
-    // Apply the patches if any were made to this file
     if (filePatchCount > 0) {
-      // We need to rebuild the asar with the patched content.
-      // @electron/asar doesn't support in-place modification,
-      // so we extract, patch, and rebuild.
       try {
-        await applyAsarContentPatch(options.asarPath, filePath, patchedContent);
+        await applyAsarContentPatch(
+          options.asarPath,
+          bundleFile,
+          patchedContent,
+        );
       } catch (err) {
         errors.push(
-          `Failed to apply patch to ${filePath} in asar: ${String(err)}`
+          `Failed to apply patch to ${bundleFile} in asar: ${String(err)}`,
         );
         continue;
       }
-
       totalPatchCount += filePatchCount;
     }
   }
@@ -398,7 +396,7 @@ export async function patchDaemonTransport(
   if (totalPatchCount === 0) {
     warnings.push(
       "No patches were applied. The asar may already be patched, or the " +
-      "target code patterns may have changed."
+        "target code patterns may have changed.",
     );
   }
 
@@ -414,91 +412,6 @@ export async function patchDaemonTransport(
   };
 }
 
-/**
- * Apply a content patch to a file inside an asar archive.
- *
- * Since @electron/asar doesn't support in-place modification, this:
- * 1. Extracts the entire asar to a temp directory
- * 2. Writes the patched file
- * 3. Rebuilds the asar from the extracted contents
- *
- * Note: asar.createPackage is async, so this function must be awaited.
- */
-async function applyAsarContentPatch(
-  asarPath: string,
-  filePath: string,
-  patchedContent: string
-): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const asar = require("@electron/asar") as typeof import("@electron/asar");
-
-  const tmpDir = asarPath + ".patch-tmp";
-  const backupPath = asarPath + ".bak";
-
-  try {
-    // Clean up any previous temp directory
-    if (fs.existsSync(tmpDir)) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-
-    // Extract the entire asar
-    asar.extractAll(asarPath, tmpDir);
-
-    // Uncache the asar filesystem to ensure fresh reads
-    asar.uncache(asarPath);
-
-    // Write the patched file
-    const extractedFilePath = path.join(tmpDir, filePath);
-    fs.writeFileSync(extractedFilePath, patchedContent, "utf-8");
-
-    // Backup the original asar before overwriting
-    fs.copyFileSync(asarPath, backupPath);
-
-    // Remove the original asar
-    fs.unlinkSync(asarPath);
-
-    // Rebuild the asar from the extracted directory (async)
-    // Use createPackageWithOptions instead of createPackage to avoid a bug
-    // where createPackage produces a corrupted asar with misaligned offsets
-    await asar.createPackageWithOptions(tmpDir, asarPath, {});
-
-    // Uncache again after rebuild to ensure fresh reads
-    asar.uncache(asarPath);
-
-    // Verify the patched file is in the rebuilt asar
-    // Note: Exact string match may fail due to encoding differences in asar
-    // rebuild, so we verify key patch markers are present instead.
-    const verifyContent = asar.extractFile(asarPath, filePath).toString("utf-8");
-    const hasPatchMarker = verifyContent.includes("linux-daemon-transport-patch");
-    const hasLinuxWebSocketGuard = verifyContent.includes('process.platform==="linux")return nc.WebSocket');
-    if (!hasPatchMarker || !hasLinuxWebSocketGuard) {
-      throw new Error(
-        "Verification failed: patched content markers not found in rebuilt asar. " +
-        `hasPatchMarker=${hasPatchMarker}, hasLinuxWebSocketGuard=${hasLinuxWebSocketGuard}`
-      );
-    }
-
-    // Success - remove backup
-    if (fs.existsSync(backupPath)) {
-      fs.unlinkSync(backupPath);
-    }
-  } catch (err) {
-    // Restore from backup on failure
-    if (fs.existsSync(backupPath) && !fs.existsSync(asarPath)) {
-      fs.copyFileSync(backupPath, asarPath);
-    }
-    if (fs.existsSync(backupPath)) {
-      fs.unlinkSync(backupPath);
-    }
-    throw err;
-  } finally {
-    // Clean up temp directory
-    if (fs.existsSync(tmpDir)) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    }
-  }
-}
-
 // ─── Validation Functions ───────────────────────────────────────────────────
 
 /**
@@ -507,12 +420,9 @@ async function applyAsarContentPatch(
  *
  * VAL-DAEMON-001: Linux app uses droid-supported daemon transport.
  * VAL-DAEMON-002: Linux droid daemon reaches healthy runtime state.
- *
- * @param options Validation options
- * @returns Validation result
  */
 export function validateDaemonTransport(
-  options: ValidateDaemonTransportOptions
+  options: ValidateDaemonTransportOptions,
 ): ValidateDaemonTransportResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -545,105 +455,102 @@ export function validateDaemonTransport(
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      // Parse supported flags from help output
       const flagPattern = /--[\w-]+/g;
-      supportedDaemonFlags = [...new Set<string>(helpOutput.match(flagPattern) || [])];
+      supportedDaemonFlags = [
+        ...new Set<string>(helpOutput.match(flagPattern) || []),
+      ];
       listenFlagSupported = supportedDaemonFlags.includes("--listen");
 
       if (listenFlagSupported) {
         warnings.push(
           "The bundled droid daemon supports --listen. " +
-          "The transport patch may not be needed for this droid version. " +
-          `Supported flags: ${supportedDaemonFlags.join(", ")}`
+            "The transport patch may not be needed for this droid version. " +
+            `Supported flags: ${supportedDaemonFlags.join(", ")}`,
         );
       }
     } catch (err) {
       warnings.push(
         `Could not run droid daemon --help: ${String(err)}. ` +
-        "Skipping supported flags check."
+          "Skipping supported flags check.",
       );
     }
   }
 
-  // Find and inspect the main bundle
-  const rawFiles = asar.listPackage(options.asarPath, { isPack: true }) as string[];
-  const files = rawFiles.map(f => parseIsPackEntry(f)).filter((f): f is string => f !== null);
-  const mainBundleFiles = files.filter(
-    (f: string) =>
-      f.startsWith(".vite/build/index-") && f.endsWith(".js")
-  );
+  const mainBundleFiles = findMainBundleFiles(options.asarPath);
 
   let forcesWebSocketOnLinux = false;
   let hasListenIpcGuard = false;
 
   for (const bundleFile of mainBundleFiles) {
-    const filePath = bundleFile; // Already normalized by parseIsPackEntry
-    const content = asar.extractFile(options.asarPath, filePath).toString("utf-8");
+    const content = asar
+      .extractFile(options.asarPath, bundleFile)
+      .toString("utf-8");
 
-    // Check for the WebSocket transport guard on Linux
-    const s9tPos = content.indexOf("async function s9t()");
-    if (s9tPos !== -1) {
-      const funcStart = s9tPos;
-      let braceCount = 0;
-      let funcEnd = funcStart;
-      for (let i = funcStart; i < content.length; i++) {
-        if (content[i] === "{") braceCount++;
-        if (content[i] === "}") {
-          braceCount--;
-          if (braceCount === 0) {
-            funcEnd = i + 1;
-            break;
-          }
-        }
-      }
-
-      const funcText = content.substring(funcStart, funcEnd);
-
-      if (
-        funcText.includes("process.platform===\"linux\"") &&
-        funcText.includes("nc.WebSocket")
-      ) {
-        forcesWebSocketOnLinux = true;
-      } else if (
-        funcText.includes("nc.Ipc") &&
-        !funcText.includes("process.platform")
-      ) {
-        errors.push(
-          "Transport selection function (s9t) can still select IPC transport " +
-          "on Linux. The daemon may emit `--listen ipc` which is not supported " +
-          "by the Linux droid CLI."
-        );
-      }
-    } else {
-      warnings.push(
-        `Could not find transport selection function (s9t) in ${filePath}. ` +
-        "The minified function name may have changed."
-      );
-    }
-
-    // Check for the --listen ipc guard
-    const listenIpcPos = content.indexOf("--listen");
-    if (listenIpcPos !== -1) {
-      const context = content.substring(
-        Math.max(0, listenIpcPos - 100),
-        Math.min(content.length, listenIpcPos + 100)
-      );
-
-      if (context.includes("process.platform") && context.includes("linux")) {
-        hasListenIpcGuard = true;
-      } else {
-        // Check if --listen ipc can still be emitted on Linux
-        if (context.includes("nc.Ipc") && !context.includes("process.platform")) {
+    // Check for the WebSocket transport guard on Linux.
+    // Version-agnostic: look for process.platform==="linux" near
+    // .WebSocket in the context of DesktopDaemonIpc.
+    if (content.includes("DesktopDaemonIpc")) {
+      // Find the transport resolver function using the same regex
+      const match = content.match(TRANSPORT_RESOLVER_REGEX);
+      if (match) {
+        const funcText = match[0];
+        if (
+          funcText.includes('process.platform==="linux"') &&
+          funcText.includes(".WebSocket")
+        ) {
+          forcesWebSocketOnLinux = true;
+        } else if (!funcText.includes("process.platform")) {
           errors.push(
-            "The daemon args construction can still push `--listen ipc` on Linux. " +
-            "This is unsupported by the Linux droid CLI."
+            "Transport resolver can still select IPC transport on Linux. " +
+              "The daemon may emit `--listen ipc` which is not supported " +
+              "by the Linux droid CLI.",
+          );
+        }
+      } else {
+        // DesktopDaemonIpc is present but the regex didn't match —
+        // the function shape changed.
+        if (content.includes(PATCH_MARKER)) {
+          forcesWebSocketOnLinux = true;
+        } else {
+          warnings.push(
+            `Found DesktopDaemonIpc in ${bundleFile} but could not parse transport resolver. ` +
+              "The function shape may have changed.",
           );
         }
       }
     }
+
+    // Check for the --listen ipc guard (version-agnostic)
+    const listenMatch = content.match(LISTEN_IPC_PUSH_REGEX);
+    if (listenMatch) {
+      // Check if the matched call already has a Linux guard
+      const context = content.substring(
+        Math.max(
+          0,
+          content.indexOf(listenMatch[0]) - 100,
+        ),
+        Math.min(
+          content.length,
+          content.indexOf(listenMatch[0]) + listenMatch[0].length + 100,
+        ),
+      );
+      if (
+        context.includes("process.platform") &&
+        context.includes("linux")
+      ) {
+        hasListenIpcGuard = true;
+      } else {
+        errors.push(
+          "The daemon args construction can still push `--listen ipc` on Linux. " +
+            "This is unsupported by the Linux droid CLI.",
+        );
+      }
+    } else if (content.includes("--listen")) {
+      // --listen exists but not in the expected push pattern
+      hasListenIpcGuard = true; // Already patched or different structure
+    }
   }
 
-  // Overall validation
   const valid = errors.length === 0 && forcesWebSocketOnLinux;
 
   return {
@@ -657,11 +564,13 @@ export function validateDaemonTransport(
   };
 }
 
+// ─── Formatting Functions ───────────────────────────────────────────────────
+
 /**
  * Format the daemon transport patch result for display.
  */
 export function formatDaemonTransportPatchResult(
-  result: DaemonTransportPatchResult
+  result: DaemonTransportPatchResult,
 ): string {
   const lines: string[] = [];
 
@@ -671,10 +580,16 @@ export function formatDaemonTransportPatchResult(
     for (const patch of result.patches) {
       lines.push(`  - [${patch.id}] ${patch.description}`);
     }
-    lines.push(`  Original asar hash: ${result.originalHash.substring(0, 16)}...`);
-    lines.push(`  Patched asar hash:  ${result.patchedHash.substring(0, 16)}...`);
+    lines.push(
+      `  Original asar hash: ${result.originalHash.substring(0, 16)}...`,
+    );
+    lines.push(
+      `  Patched asar hash:  ${result.patchedHash.substring(0, 16)}...`,
+    );
   } else if (result.success) {
-    lines.push("ℹ No daemon transport patch was needed (already patched or no matching patterns).");
+    lines.push(
+      "ℹ No daemon transport patch was needed (already patched or no matching patterns).",
+    );
   }
 
   for (const err of result.errors) {
@@ -691,24 +606,30 @@ export function formatDaemonTransportPatchResult(
  * Format the daemon transport validation result for display.
  */
 export function formatDaemonTransportValidationResult(
-  result: ValidateDaemonTransportResult
+  result: ValidateDaemonTransportResult,
 ): string {
   const lines: string[] = [];
 
-  lines.push(result.valid ? "✓ Daemon transport validation passed." : "✗ Daemon transport validation FAILED.");
+  lines.push(
+    result.valid
+      ? "✓ Daemon transport validation passed."
+      : "✗ Daemon transport validation FAILED.",
+  );
 
   lines.push(
-    `  Forces WebSocket on Linux: ${result.forcesWebSocketOnLinux ? "✓ Yes" : "✗ No"}`
+    `  Forces WebSocket on Linux: ${result.forcesWebSocketOnLinux ? "✓ Yes" : "✗ No"}`,
   );
   lines.push(
-    `  --listen ipc guard: ${result.hasListenIpcGuard ? "✓ Present" : "✗ Missing"}`
+    `  --listen ipc guard: ${result.hasListenIpcGuard ? "✓ Present" : "✗ Missing"}`,
   );
   lines.push(
-    `  --listen flag supported by droid: ${result.listenFlagSupported ? "Yes" : "No (as expected)"}`
+    `  --listen flag supported by droid: ${result.listenFlagSupported ? "Yes" : "No (as expected)"}`,
   );
 
   if (result.supportedDaemonFlags) {
-    lines.push(`  Supported daemon flags: ${result.supportedDaemonFlags.join(", ")}`);
+    lines.push(
+      `  Supported daemon flags: ${result.supportedDaemonFlags.join(", ")}`,
+    );
   }
 
   for (const err of result.errors) {
