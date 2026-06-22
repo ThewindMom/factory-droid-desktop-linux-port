@@ -32,7 +32,7 @@ jobs:
       should_build: ${{ steps.check-version.outputs.should_build }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check upstream version and compare with latest release
         id: check-version
@@ -64,13 +64,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full history needed to generate commit log for release notes
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: 'npm'
@@ -201,7 +201,7 @@ jobs:
 
       - name: Upload .deb as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: factory-desktop-${{ env.FACTORY_VERSION }}-deb
           path: dist/*.deb
@@ -209,7 +209,7 @@ jobs:
 
       - name: Upload .rpm as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: factory-desktop-${{ env.FACTORY_VERSION }}-rpm
           path: dist/*.rpm
