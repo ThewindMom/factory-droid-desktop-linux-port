@@ -88,6 +88,7 @@ Variables:
 | Variable | Description |
 |---|---|
 | `DMG=/path/file.dmg` | Override the DMG to build from |
+| `PACKAGE_WITH_UPDATER=0` | Build without the updater or service unit |
 | `DEB=/path/file.deb` | Override the `.deb` used by `make install` |
 | `RPM=/path/file.rpm` | Override the `.rpm` used by `make install` |
 

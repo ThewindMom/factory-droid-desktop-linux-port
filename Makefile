@@ -48,6 +48,7 @@ help:
 	@printf '  %-22s %s\n' "make clean-state" "Remove updater runtime state"
 	@printf '\nVariables:\n\n'
 	@printf '  %-22s %s\n' "DMG=/path/file.dmg" "Override the DMG to build from"
+	@printf '  %-22s %s\n' "PACKAGE_WITH_UPDATER=0" "Build without the updater"
 	@printf '  %-22s %s\n' "DEB=/path/file.deb" "Override the .deb for make install"
 	@printf '  %-22s %s\n' "RPM=/path/file.rpm" "Override the .rpm for make install"
 	@printf '\nExamples:\n\n'
