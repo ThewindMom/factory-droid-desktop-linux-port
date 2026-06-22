@@ -120,7 +120,7 @@ impl RuntimeConfig {
             notifications: true,
             workspace_root: paths.cache_dir.clone(),
             builder_bundle_root,
-            app_executable_path: PathBuf::from("/opt/factory-desktop/factory-desktop"),
+            app_executable_path: PathBuf::from("/opt/Factory/factory-desktop"),
             github_owner: default_github_owner(),
             github_repo: default_github_repo(),
         }
