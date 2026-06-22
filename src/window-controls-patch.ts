@@ -7,13 +7,11 @@
  * minimize, maximize, or close buttons.
  *
  * Fix: On Linux, keep `titleBarStyle: "hidden"` but add `titleBarOverlay`
- * with dark/light theme-aware colors. This gives a frameless window with
- * Electron-drawn min/max/close buttons (like Windows), matching the
- * aesthetic of the macOS and Windows builds.
- *
- * This mirrors the approach used by ilysenko/codex-desktop-linux, which
- * injects a `titleBarOverlay` config for Linux with colors derived from
- * Electron's `nativeTheme.shouldUseDarkColors`.
+ * with static dark colors (`#1e1e1e` background, `#cccccc` symbols).
+ * This gives a frameless window with Electron-drawn min/max/close buttons
+ * (like Windows). Static colors are used because `nativeTheme` may not
+ * be initialized at BrowserWindow construction time, causing the window
+ * to silently fail to appear.
  *
  * Version-agnostic design: The regex matches the ternary pattern
  * `titleBarStyle:<var>?"default":"hidden"` regardless of the minified
@@ -90,13 +88,14 @@ const PATCH_MARKER = "/* linux-titlebar-overlay-patch */";
  * The replacement produces:
  * ```js
  * titleBarStyle:process.platform==="linux"?"hidden":(<var>?"default":"hidden"),
- * titleBarOverlay:process.platform==="linux"?{color:Y.nativeTheme.shouldUseDarkColors?"#1e1e1e":"#e8e8e8",symbolColor:Y.nativeTheme.shouldUseDarkColors?"#cccccc":"#333333",height:30}:void 0,
+ * titleBarOverlay:process.platform==="linux"?{color:"#1e1e1e",symbolColor:"#cccccc",height:30}:void 0,
  * ```
  *
- * `Y` is the Electron module alias used in Factory's bundle (confirmed
- * via `Y.BrowserWindow` and `Y.nativeTheme.shouldUseDarkColors` in the
- * same scope). The `titleBarOverlay` property is only set on Linux; on
- * other platforms it's `void 0` (undefined), preserving original behavior.
+ * Static dark colors are used because `nativeTheme` may not be
+ * initialized at BrowserWindow construction time, causing the window
+ * to silently fail to appear. The `titleBarOverlay` property is only
+ * set on Linux; on other platforms it's `void 0` (undefined),
+ * preserving original behavior.
  */
 const TITLE_BAR_STYLE_REGEX =
   /(titleBarStyle:)(\w+)\?"default":"hidden"(,)/;
@@ -246,8 +245,8 @@ export async function patchWindowControls(
       patches.push({
         id: "linux-titlebar-overlay",
         description:
-          "Inject titleBarOverlay on Linux with dark/light theme-aware " +
-            "colors for frameless window with Electron-drawn buttons",
+          "Inject titleBarOverlay on Linux with static dark colors " +
+            "for frameless window with Electron-drawn buttons",
         originalSnippet: simpleResult.match,
         replacementSnippet:
           `titleBarStyle:process.platform==="linux"?"hidden":(VAR?"default":"hidden"),` +

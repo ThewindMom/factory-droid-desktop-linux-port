@@ -1,4 +1,4 @@
-# Factory Droid Desktop for Linux
+# Factory Desktop for Linux
 
 Unofficial Linux build wrapper for [Factory Droid Desktop](https://factory.ai/product/desktop).
 The official Factory Desktop app is available for macOS and Windows; this repository
@@ -27,8 +27,8 @@ sudo apt-get install -f -y
 Or build from source:
 
 ```bash
-git clone https://github.com/ThewindMom/factory-droid-desktop-linux-port.git
-cd factory-droid-desktop-linux-port
+git clone https://github.com/ThewindMom/factory-desktop-linux.git
+cd factory-desktop-linux
 make build-app
 make deb
 make install
@@ -86,7 +86,7 @@ Variables:
 | Native packages | Always | `make package && make install` | This README |
 | Auto-update manager | Native packages | Included unless `PACKAGE_WITH_UPDATER=0` | [Updater](#auto-update-manager) |
 | AppImage self-build | Manual | `make build-app && make appimage` | This README |
-| GitHub Releases CI | Automatic | Daily cron checks for new upstream versions | [CI](#github-releases) |
+| GitHub Releases CI | Automatic | Pushes + daily cron check for new upstream versions | [CI](#github-releases) |
 | Linux Features framework | Opt-in | Edit `linux-features/features.json` | [Linux Features](linux-features/README.md) |
 
 ## How It Works
@@ -144,11 +144,13 @@ The registry currently ships three core patches:
   Linux it would fail and potentially crash the app. The Rust-based
   `factory-update-manager` handles Linux updates independently.
 
-- **`window-controls`** — injects `titleBarOverlay` on Linux with dark/light
-  theme-aware colors, giving a frameless window with Electron-drawn
-  minimize/close buttons (matching the macOS/Windows aesthetic). Without this,
-  the app uses `"hidden"` titleBarStyle on Linux (because it's not win32),
-  resulting in no title bar at all.
+- **`window-controls`** — injects `titleBarOverlay` on Linux with static dark
+  colors (`#1e1e1e` background, `#cccccc` symbols), giving a frameless window
+  with Electron-drawn minimize/maximize/close buttons. Static colors are used
+  because `nativeTheme` may not be initialized at BrowserWindow construction
+  time, causing the window to silently fail to appear. Without this, the app
+  uses `"hidden"` titleBarStyle on Linux (because it's not win32), resulting in
+  no title bar at all.
 
 ### 3. Droid CLI binary
 
@@ -159,8 +161,10 @@ builder downloads the tarball from
 extracts `package/bin/droid`, and stages it into `resources/bin/droid`.
 
 Desktop version and CLI version don't always match (Desktop 0.110.0 has no
-CLI 0.110.0 on npm — it jumps from 0.109.3 to 0.111.0). The resolver picks
-the nearest version by numeric distance.
+CLI 0.110.0 on npm — it jumps from 0.109.3 to 0.111.0). The resolver always
+uses the **latest version from npm** to ensure all daemon JSON-RPC methods are
+supported (older versions like 0.109.3 lack `daemon.list_custom_models`, which
+breaks the Custom Models settings page).
 
 ### 4. Optional linux-features
 
@@ -193,6 +197,15 @@ It:
 - runs unprivileged; the final package install uses `pkexec` with a polkit
   policy configured for **passwordless** installation (no password prompt)
 - performs rollback to the previous known-good package
+
+> **Known limitation:** The daemon's builder code is frozen at `.deb` install
+> time — it bundles `dist/cli.js` + `src/patches/` from the commit that built
+> the `.deb` into `/opt/factory-desktop/update-builder/`. When upstream
+> releases a new DMG, the daemon rebuilds using that frozen builder code, not
+> the latest patches from GitHub. Port fixes (patch updates, droid resolver
+> changes, etc.) only reach users who manually reinstall the `.deb`. A
+> future update feed (`latest-linux.yml`) would allow the daemon to check for
+> new port builds.
 
 ### Inspect State
 
@@ -238,16 +251,23 @@ polkit policy, and the bundled update builder.
 
 ## GitHub Releases
 
-A daily GitHub Actions workflow (`.github/workflows/release.yml`) checks
-`https://api.factory.ai/api/desktop/latest-version` and, if a new version is
-detected that doesn't have an existing GitHub release, automatically:
+A GitHub Actions workflow (`.github/workflows/release.yml`) rebuilds the `.deb`
+on every push to `master` (when `src/`, `packaging/`, `patches/`, `updater/`,
+or workflow files change), and also runs a daily cron check for new upstream
+versions.
+
+The workflow:
 
 1. Builds the TypeScript engine and Rust updater
 2. Fetches the upstream DMG
 3. Applies all registered asar patches
 4. Assembles the Linux Electron app
 5. Packages a `.deb` with the updater bundled
-6. Creates a GitHub release with the `.deb` attached
+6. Creates or updates a GitHub release with the `.deb` attached
+7. Moves the release tag to the current commit
+
+Release notes include the commit log since the previous release, the droid
+CLI version bundled, and the build timestamp.
 
 This provides pre-built packages for users who don't want to build from
 source. The Rust auto-update manager (in-app) operates independently — it
@@ -324,6 +344,7 @@ make test            # cargo test
 | No window controls | The window-controls patch isn't applied — rebuild from latest source |
 | Updater seems stuck | Run `factory-update-manager status --json` and check service logs |
 | `make build-app` fails | Run `node dist/cli.js check-tools` to verify all dependencies are installed |
+| Custom Models page empty | The bundled droid is too old — rebuild from latest source to get the latest droid from npm |
 
 ## Disclaimer
 

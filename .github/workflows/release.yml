@@ -65,6 +65,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history needed to generate commit log for release notes
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -122,15 +125,31 @@ jobs:
       - name: Create or update GitHub release
         run: |
           RELEASE_TAG="v$FACTORY_VERSION"
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          BUILD_SHA=$(git rev-parse --short HEAD)
+
+          # Generate commit log since the previous tag position.
+          # On first release there is no previous tag, so use the first commit.
+          PREV_TAG_SHA=$(git rev-list --max-count=1 "$RELEASE_TAG" 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          COMMIT_LOG=$(git log --oneline --no-decorate "$PREV_TAG_SHA..HEAD" 2>/dev/null | head -30)
+
+          # Build release notes with commit log and build metadata
           RELEASE_NOTES="Auto-built from upstream Factory Desktop $FACTORY_VERSION DMG.
+
+          **Build:** \`$BUILD_SHA\` on $BUILD_DATE
+
+          **Recent commits:**
+          \`\`\`
+          $COMMIT_LOG
+          \`\`\`
 
           **Includes:**
           - Linux Electron runtime
-          - Droid CLI binary (from @factory/cli-linux-x64 npm)
+          - Droid CLI binary (latest from @factory/cli-linux-x64 npm)
           - Version-agnostic asar patches:
             - Daemon transport (force WebSocket on Linux)
             - Auto-updater guard (disable Electron autoUpdater on Linux)
-            - Window controls (titleBarOverlay with dark-themed buttons)
+            - Window controls (titleBarOverlay with static dark buttons)
           - Rust auto-update manager (factory-update-manager)
           - systemd --user service unit
           - polkit policy
@@ -139,9 +158,7 @@ jobs:
           \`\`\`bash
           sudo dpkg -i factory-desktop_${FACTORY_VERSION}_amd64.deb
           sudo apt-get install -f -y
-          \`\`\`
-
-          Built by GitHub Actions on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+          \`\`\`"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists — updating asset, notes, and tag."
