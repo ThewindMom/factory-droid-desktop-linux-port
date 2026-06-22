@@ -5,7 +5,7 @@ The official Factory Desktop app is available for macOS and Windows; this reposi
 covers Linux by converting the upstream macOS `Factory.dmg` into a runnable Linux
 Electron app.
 
-The project builds native `.deb` and `.rpm` packages, supports local AppImage
+The project builds native `.deb` and `.rpm` packages, supports local AppImage self-builds,
 and can install a local update manager that rebuilds future Linux packages from
 newer upstream DMGs.
 
