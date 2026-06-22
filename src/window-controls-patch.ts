@@ -4,15 +4,21 @@
  * Problem: Factory Desktop sets `titleBarStyle: "hidden"` when not on
  * Windows. On macOS, `"hidden"` is fine because the OS draws traffic
  * light buttons. On Linux, `"hidden"` means no title bar at all — no
- * minimize, maximize, or close buttons. The user cannot move, resize,
- * or close the window without keyboard shortcuts.
+ * minimize, maximize, or close buttons.
  *
- * Fix: Override `titleBarStyle` to `"default"` on Linux so the native
- * window manager draws the standard title bar with min/max/close buttons.
+ * Fix: On Linux, keep `titleBarStyle: "hidden"` but add `titleBarOverlay`
+ * with dark/light theme-aware colors. This gives a frameless window with
+ * Electron-drawn min/max/close buttons (like Windows), matching the
+ * aesthetic of the macOS and Windows builds.
+ *
+ * This mirrors the approach used by ilysenko/codex-desktop-linux, which
+ * injects a `titleBarOverlay` config for Linux with colors derived from
+ * Electron's `nativeTheme.shouldUseDarkColors`.
  *
  * Version-agnostic design: The regex matches the ternary pattern
  * `titleBarStyle:<var>?"default":"hidden"` regardless of the minified
- * variable name.
+ * variable name. The replacement injects `titleBarOverlay` as a sibling
+ * property in the BrowserWindow options object.
  *
  * Fulfills: VAL-WINDOW-001
  */
@@ -58,14 +64,14 @@ export interface ValidateWindowControlsOptions {
 
 export interface ValidateWindowControlsResult {
   valid: boolean;
-  titleBarStyleDefaultOnLinux: boolean;
+  titleBarOverlayOnLinux: boolean;
   errors: string[];
   warnings: string[];
 }
 
 // ─── Patch Constants ────────────────────────────────────────────────────────
 
-const PATCH_MARKER = "/* linux-window-controls-patch */";
+const PATCH_MARKER = "/* linux-titlebar-overlay-patch */";
 
 /**
  * Regex matching the titleBarStyle ternary.
@@ -76,27 +82,37 @@ const PATCH_MARKER = "/* linux-window-controls-patch */";
  * ```
  * where `<var>` is typically `process.platform === "win32"`.
  *
- * We replace it with:
- * ```js
- * titleBarStyle:process.platform==="linux"?"default":(<var>?"default":"hidden")
- * ```
- * so Linux gets the default title bar, while macOS keeps its hidden style
- * with traffic light buttons.
+ * We capture:
+ * - Group 1: the `titleBarStyle:` prefix
+ * - Group 2: the variable name (e.g., `r`)
+ * - Group 3: the trailing comma (to inject a sibling property)
  *
- * The regex captures the variable name so we can preserve it in the
- * replacement.
+ * The replacement produces:
+ * ```js
+ * titleBarStyle:process.platform==="linux"?"hidden":(<var>?"default":"hidden"),
+ * titleBarOverlay:process.platform==="linux"?{color:Y.nativeTheme.shouldUseDarkColors?"#1e1e1e":"#e8e8e8",symbolColor:Y.nativeTheme.shouldUseDarkColors?"#cccccc":"#333333",height:30}:void 0,
+ * ```
+ *
+ * `Y` is the Electron module alias used in Factory's bundle (confirmed
+ * via `Y.BrowserWindow` and `Y.nativeTheme.shouldUseDarkColors` in the
+ * same scope). The `titleBarOverlay` property is only set on Linux; on
+ * other platforms it's `void 0` (undefined), preserving original behavior.
  */
 const TITLE_BAR_STYLE_REGEX =
-  /titleBarStyle:(\w+)\?"default":"hidden"/;
+  /(titleBarStyle:)(\w+)\?"default":"hidden"(,)/;
 
 /**
- * Build the replacement for the titleBarStyle ternary.
- *
- * On Linux: returns "default" (native title bar with min/max/close).
- * On other platforms: preserves the original ternary.
+ * Find the Electron module alias by looking for `<alias>.BrowserWindow`
+ * near the titleBarStyle match site. Returns the alias string (e.g., "Y").
  */
-function buildTitleBarStyleReplacement(varRef: string): string {
-  return `titleBarStyle:process.platform==="linux"?"default":(${varRef}?"default":"hidden")`;
+function findElectronAlias(content: string, matchPos: number): string | null {
+  // Search backwards from the match position for <alias>.BrowserWindow
+  const searchStart = Math.max(0, matchPos - 5000);
+  const searchRegion = content.substring(searchStart, matchPos + 200);
+  const match = searchRegion.match(
+    /([A-Za-z_$][\w$]*)\.BrowserWindow\b/,
+  );
+  return match ? match[1] : null;
 }
 
 // ─── Core Patching Functions ────────────────────────────────────────────────
@@ -171,19 +187,47 @@ export async function patchWindowControls(
       continue;
     }
 
+    // Also skip if the old "default" patch marker is present
+    if (skipIfPatched && content.includes("/* linux-window-controls-patch */")) {
+      alreadyPatched = true;
+      warnings.push(
+        `Bundle ${bundleFile} has the old "default" titlebar patch. ` +
+          `Rebuilding from a fresh DMG is required to apply the overlay patch.`,
+      );
+      continue;
+    }
+
     if (!content.includes("titleBarStyle")) continue;
+
+    // Find the match position to locate the Electron alias
+    const match = content.match(TITLE_BAR_STYLE_REGEX);
+    if (!match || match.index === undefined) continue;
+
+    const electronAlias = findElectronAlias(content, match.index);
+    if (!electronAlias) {
+      errors.push(
+        `Could not find Electron module alias (e.g., Y.BrowserWindow) ` +
+          `near titleBarStyle in ${bundleFile}. Skipping patch.`,
+      );
+      continue;
+    }
 
     let patchedContent = content;
 
-    const result: RegexPatchResult = applyRegexPatch(
+    const simpleResult: RegexPatchResult = applyRegexPatch(
       patchedContent,
       TITLE_BAR_STYLE_REGEX,
-      (_match, varRef) =>
-        PATCH_MARKER + buildTitleBarStyleReplacement(varRef),
+      (_match, _prefix, varRef, _comma) => {
+        const overlayConfig = `{color:${electronAlias}.nativeTheme.shouldUseDarkColors?"#1e1e1e":"#e8e8e8",symbolColor:${electronAlias}.nativeTheme.shouldUseDarkColors?"#cccccc":"#333333",height:30}`;
+        return (
+          `titleBarStyle:process.platform==="linux"?"hidden":(${varRef}?"default":"hidden"),` +
+          `${PATCH_MARKER}titleBarOverlay:process.platform==="linux"?${overlayConfig}:void 0,`
+        );
+      },
     );
 
-    if (result.matched) {
-      patchedContent = result.content;
+    if (simpleResult.matched) {
+      patchedContent = simpleResult.content;
 
       try {
         await applyAsarContentPatch(
@@ -200,12 +244,14 @@ export async function patchWindowControls(
 
       totalPatchCount++;
       patches.push({
-        id: "force-default-titlebar-on-linux",
+        id: "linux-titlebar-overlay",
         description:
-          'Override titleBarStyle to "default" on Linux so the native ' +
-            "window manager draws min/max/close buttons",
-        originalSnippet: result.match,
-        replacementSnippet: "...force default titlebar on Linux...",
+          "Inject titleBarOverlay on Linux with dark/light theme-aware " +
+            "colors for frameless window with Electron-drawn buttons",
+        originalSnippet: simpleResult.match,
+        replacementSnippet:
+          `titleBarStyle:process.platform==="linux"?"hidden":(VAR?"default":"hidden"),` +
+          `${PATCH_MARKER}titleBarOverlay:process.platform==="linux"?{color,symbolColor,height}:void 0,`,
       });
     }
   }
@@ -268,7 +314,7 @@ export function validateWindowControls(
   if (!fs.existsSync(options.asarPath)) {
     return {
       valid: false,
-      titleBarStyleDefaultOnLinux: false,
+      titleBarOverlayOnLinux: false,
       errors: [`app.asar not found: ${options.asarPath}`],
       warnings,
     };
@@ -278,7 +324,7 @@ export function validateWindowControls(
   const asar = require("@electron/asar") as typeof import("@electron/asar");
   const mainBundleFiles = findMainBundleFiles(options.asarPath);
 
-  let titleBarStyleDefaultOnLinux = false;
+  let titleBarOverlayOnLinux = false;
 
   for (const bundleFile of mainBundleFiles) {
     const content = asar
@@ -287,24 +333,25 @@ export function validateWindowControls(
 
     if (!content.includes("titleBarStyle")) continue;
 
+    // Check for the new overlay patch marker
+    if (content.includes(PATCH_MARKER)) {
+      titleBarOverlayOnLinux = true;
+      continue;
+    }
+
+    // Check for the old "default" patch marker (still valid, just different approach)
+    if (content.includes("/* linux-window-controls-patch */")) {
+      titleBarOverlayOnLinux = true;
+      continue;
+    }
+
+    // Check for unpatched titleBarStyle:hidden on Linux
     const match = content.match(TITLE_BAR_STYLE_REGEX);
     if (match) {
-      // Check if the matched ternary already has a Linux guard
-      const pos = content.indexOf(match[0]);
-      const before = content.substring(Math.max(0, pos - 80), pos);
-      if (
-        before.includes('process.platform==="linux"') ||
-        before.includes(PATCH_MARKER)
-      ) {
-        titleBarStyleDefaultOnLinux = true;
-      } else {
-        errors.push(
-          'titleBarStyle is set to "hidden" on Linux. The window will have ' +
-            "no title bar or min/max/close buttons.",
-        );
-      }
-    } else if (content.includes(PATCH_MARKER)) {
-      titleBarStyleDefaultOnLinux = true;
+      errors.push(
+        'titleBarStyle is set to "hidden" on Linux with no titleBarOverlay. ' +
+          "The window will have no title bar or min/max/close buttons.",
+      );
     }
   }
 
@@ -312,7 +359,7 @@ export function validateWindowControls(
 
   return {
     valid,
-    titleBarStyleDefaultOnLinux,
+    titleBarOverlayOnLinux,
     errors,
     warnings,
   };
@@ -365,7 +412,7 @@ export function formatWindowControlsValidationResult(
   );
 
   lines.push(
-    `  titleBarStyle "default" on Linux: ${result.titleBarStyleDefaultOnLinux ? "✓ Yes" : "✗ No"}`,
+    `  titleBarOverlay on Linux: ${result.titleBarOverlayOnLinux ? "✓ Yes" : "✗ No"}`,
   );
 
   for (const err of result.errors) {

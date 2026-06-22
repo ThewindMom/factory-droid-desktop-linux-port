@@ -145,16 +145,16 @@ const autoUpdaterPatch: Patch = {
 };
 
 /**
- * The window controls patch overrides titleBarStyle to "default" on Linux
- * so the native window manager draws minimize, maximize, and close buttons.
- * Without this, the app uses "hidden" titleBarStyle on Linux (because it's
- * not win32), resulting in no title bar at all.
+ * The window controls patch injects titleBarOverlay on Linux — a frameless
+ * window (titleBarStyle: "hidden") with Electron-drawn min/max/close buttons
+ * that are dark/light theme-aware via nativeTheme.shouldUseDarkColors.
+ * This mirrors the approach used by ilysenko/codex-desktop-linux.
  */
 const windowControlsPatch: Patch = {
   id: "window-controls",
   description:
-    'Override titleBarStyle to "default" on Linux for native min/max/close ' +
-      "window controls.",
+    'Inject titleBarOverlay on Linux for frameless window with ' +
+      "Electron-drawn min/max/close buttons (dark/light theme-aware).",
   apply: (options) =>
     patchWindowControls({
       asarPath: options.asarPath,

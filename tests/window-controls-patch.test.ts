@@ -1,9 +1,9 @@
 /**
  * Tests for the Linux window controls compatibility patch.
  *
- * Validates VAL-WINDOW-001: The packaged Linux app must have native
- * window controls (minimize, maximize, close) by using the default
- * titleBarStyle on Linux instead of "hidden".
+ * Validates VAL-WINDOW-001: The packaged Linux app must have window
+ * controls (minimize, maximize, close) by injecting titleBarOverlay
+ * on Linux with dark/light theme-aware colors.
  */
 
 import {
@@ -26,20 +26,20 @@ const TITLE_BAR_STYLE_0_110_0 =
 
 describe("window-controls-patch version-agnostic matching", () => {
   it("matches Factory 0.110.0 titleBarStyle pattern", () => {
-    const pattern = /titleBarStyle:(\w+)\?"default":"hidden"/;
+    const pattern = /(titleBarStyle:)(\w+)\?"default":"hidden"(,)/;
     expect(TITLE_BAR_STYLE_0_110_0).toMatch(pattern);
   });
 
   it("extracts the variable reference from the ternary", () => {
-    const pattern = /titleBarStyle:(\w+)\?"default":"hidden"/;
+    const pattern = /(titleBarStyle:)(\w+)\?"default":"hidden"(,)/;
     const match = TITLE_BAR_STYLE_0_110_0.match(pattern);
-    expect(match?.[1]).toBe("r");
+    expect(match?.[2]).toBe("r");
   });
 
   it("matches alternative variable names", () => {
-    const pattern = /titleBarStyle:(\w+)\?"default":"hidden"/;
-    expect('titleBarStyle:e?"default":"hidden"').toMatch(pattern);
-    expect('titleBarStyle:Cu?"default":"hidden"').toMatch(pattern);
+    const pattern = /(titleBarStyle:)(\w+)\?"default":"hidden"(,)/;
+    expect('titleBarStyle:e?"default":"hidden",').toMatch(pattern);
+    expect('titleBarStyle:Cu?"default":"hidden",').toMatch(pattern);
   });
 });
 
@@ -92,7 +92,7 @@ describe("validateWindowControls", () => {
     });
 
     expect(result.valid).toBe(false);
-    expect(result.titleBarStyleDefaultOnLinux).toBe(false);
+    expect(result.titleBarOverlayOnLinux).toBe(false);
     expect(result.errors).toEqual(
       expect.arrayContaining([expect.stringContaining("not found")]),
     );
@@ -111,7 +111,7 @@ describe("formatWindowControlsPatchResult", () => {
       patchCount: 1,
       patches: [
         {
-          id: "force-default-titlebar-on-linux",
+          id: "linux-titlebar-overlay",
           description: "Test patch",
           originalSnippet: "original",
           replacementSnippet: "replacement",
@@ -160,7 +160,7 @@ describe("formatWindowControlsValidationResult", () => {
   it("formats passing result", () => {
     const result = formatWindowControlsValidationResult({
       valid: true,
-      titleBarStyleDefaultOnLinux: true,
+      titleBarOverlayOnLinux: true,
       errors: [],
       warnings: [],
     });
@@ -172,8 +172,8 @@ describe("formatWindowControlsValidationResult", () => {
   it("formats failing result", () => {
     const result = formatWindowControlsValidationResult({
       valid: false,
-      titleBarStyleDefaultOnLinux: false,
-      errors: ["titleBarStyle is set to hidden on Linux"],
+      titleBarOverlayOnLinux: false,
+      errors: ["titleBarStyle is set to hidden on Linux with no titleBarOverlay"],
       warnings: [],
     });
 

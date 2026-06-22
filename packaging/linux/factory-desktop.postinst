@@ -18,6 +18,11 @@ if [ -f "$SANDBOX" ]; then
     chmod 4755 "$SANDBOX" 2>/dev/null || true
 fi
 
+# Refresh icon cache so GNOME/taskbar picks up the installed hicolor icons.
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f /usr/share/icons/hicolor/ >/dev/null 2>&1 || true
+fi
+
 UNIT="factory-update-manager.service"
 
 # Reload the system daemon so the user unit is visible.

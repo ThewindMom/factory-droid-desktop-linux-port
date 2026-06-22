@@ -645,6 +645,7 @@ function buildUpdaterExtraFiles(
       to: "/usr/share/polkit-1/actions/org.factory.desktop.update-manager.policy",
     });
   }
+
   // Stage the builder checkout to /opt/factory-desktop/update-builder/ so the
   // updater can rebuild from new upstream DMGs without re-cloning. We stage the
   // essential directories needed for a rebuild (dist/, node_modules/, src/,
@@ -673,6 +674,24 @@ function buildUpdaterExtraFiles(
 
   return { extraFiles };
 }
+/**
+ * Build extraFiles entries for hicolor theme icons. These are always
+ * included regardless of whether the updater is bundled — the taskbar/dock
+ * icon must show Factory's actual logo (extracted from the DMG's ICNS),
+ * not the generic Electron atom icon that electron-builder defaults to.
+ */
+function buildHicolorIconExtraFiles(
+  projectRoot: string
+): { extraFiles: Array<{ from: string; to: string }> } | undefined {
+  const hicolorDir = path.join(
+    projectRoot, "build", "desktop-integration", "icons", "hicolor"
+  );
+  if (!fs.existsSync(hicolorDir)) return undefined;
+  return {
+    extraFiles: [{ from: hicolorDir, to: "/usr/share/icons/hicolor" }],
+  };
+}
+
 /**
  * Create the electron-builder configuration object.
  */
@@ -728,6 +747,8 @@ export function createElectronBuilderConfig(options: PackageBuildOptions, projec
     // Bundles the update manager binary, systemd unit, polkit policy, and
     // updater source into the package.
     ...(buildUpdaterExtraFiles(options, projectRoot) || {}),
+    // Hicolor theme icons — always included (independent of updater).
+    ...(buildHicolorIconExtraFiles(projectRoot) || {}),
     appImage: {
       // AppImage-specific options
     },

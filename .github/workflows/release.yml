@@ -118,7 +118,7 @@ jobs:
           - Version-agnostic asar patches:
             - Daemon transport (force WebSocket on Linux)
             - Auto-updater guard (disable Electron autoUpdater on Linux)
-            - Window controls (force default titleBarStyle on Linux)
+            - Window controls (titleBarOverlay with dark/light theme-aware buttons)
           - Rust auto-update manager (factory-update-manager)
           - systemd --user service unit
           - polkit policy

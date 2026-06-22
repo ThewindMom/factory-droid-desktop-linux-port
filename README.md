@@ -144,7 +144,7 @@ The registry currently ships three core patches:
   Linux it would fail and potentially crash the app. The Rust-based
   `factory-update-manager` handles Linux updates independently.
 
-- **`window-controls`** — overrides `titleBarStyle` to `"default"` on Linux so
+- **`window-controls`** — injects `titleBarOverlay` on Linux with dark/light theme-aware colors, giving a frameless window with Electron-drawn minimize/close buttons (matching macOS/Windows aesthetic)
   the native window manager draws minimize, maximize, and close buttons.
   Without this, the app uses `"hidden"` titleBarStyle on Linux (because it's
   not win32), resulting in no title bar at all.
