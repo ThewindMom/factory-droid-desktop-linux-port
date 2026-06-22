@@ -26,8 +26,9 @@ import {
   AsarPackageMetadata,
 } from "../src/asar-metadata";
 
-// Reference DMG path
-const X64_DMG = "/home/thewind/Downloads/Factory-0.106.0-x64.dmg";
+import { resolveFetchedDmg } from "./_helpers/fetched-dmg";
+
+const X64_DMG = resolveFetchedDmg("x64");
 const x64DmgAvailable = fs.existsSync(X64_DMG);
 
 // Path where app.asar would be extracted

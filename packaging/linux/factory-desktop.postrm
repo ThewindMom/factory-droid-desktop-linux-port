@@ -1,0 +1,28 @@
+#!/bin/sh
+# postrm hook for factory-desktop deb package.
+# Stops/disables the update-manager service (on remove) and reloads
+# systemd (on purge). fpm's afterRemove runs for both --remove and
+# --purge; we handle both here since electron-builder does not support
+# a prerm/beforeRemove script.
+#
+# IMPORTANT: Do NOT use dollar-brace shell syntax in this file.
+# electron-builder's fpm target treats dollar-brace-alpha as a template
+# macro and throws "Macro <name> is not defined" on unknown names.
+# Use $var (no braces) instead — it is valid POSIX shell.
+
+set -e
+
+UNIT="factory-update-manager.service"
+
+if command -v systemctl >/dev/null 2>&1; then
+    for user_dir in /run/user/*/; do
+        [ -d "$user_dir" ] || continue
+        uid=$(basename "$user_dir")
+        systemctl --user --machine="$uid@.host" stop "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" daemon-reload >/dev/null 2>&1 || true
+    done
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0

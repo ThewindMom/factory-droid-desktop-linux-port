@@ -14,9 +14,10 @@ import * as os from "os";
 import { execSync } from "child_process";
 import { validateDmg, validateArm64Dmg } from "../src/dmg-validator";
 
-// Reference DMG paths from the environment
-const X64_DMG = "/home/thewind/Downloads/Factory-0.106.0-x64.dmg";
-const ARM64_DMG = "/home/thewind/Downloads/Factory-0.106.0-arm64.dmg";
+import { resolveFetchedDmg } from "./_helpers/fetched-dmg";
+
+const X64_DMG = resolveFetchedDmg("x64");
+const ARM64_DMG = resolveFetchedDmg("arm64");
 
 // Whether reference DMGs are available for testing
 const x64DmgAvailable = fs.existsSync(X64_DMG);

@@ -1,0 +1,31 @@
+#!/bin/sh
+# postinst hook for factory-desktop deb package.
+# Reloads systemd and enables the update manager --user service.
+#
+# IMPORTANT: Do NOT use dollar-brace shell syntax in this file.
+# electron-builder's fpm target treats dollar-brace-alpha as a template
+# macro and throws "Macro <name> is not defined" on unknown names.
+# Use $var (no braces) instead — it is valid POSIX shell.
+
+set -e
+
+UNIT="factory-update-manager.service"
+
+# Reload the system daemon so the user unit is visible.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+# Reload user manager instances for logged-in users, and best-effort
+# enable + start the update-manager service for each.
+if command -v systemctl >/dev/null 2>&1; then
+    for user_dir in /run/user/*/; do
+        [ -d "$user_dir" ] || continue
+        uid=$(basename "$user_dir")
+        systemctl --user --machine="$uid@.host" daemon-reload >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" enable "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" start "$UNIT" >/dev/null 2>&1 || true
+    done
+fi
+
+exit 0

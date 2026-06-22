@@ -40,3 +40,6 @@ Thumbs.db
 
 # Coverage
 coverage/
+
+# Rust build artifacts
+updater/target/

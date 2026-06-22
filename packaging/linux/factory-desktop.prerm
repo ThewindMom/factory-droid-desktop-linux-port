@@ -1,0 +1,28 @@
+#!/bin/sh
+# prerm hook — NOT WIRED.
+#
+# electron-builder's fpm target only supports afterInstall (postinst)
+# and afterRemove (postrm). There is no beforeRemove/prerm hook. The
+# stop+disable logic that would live here is handled in the postrm
+# script instead. This file is retained for reference and for any
+# future packaging backend that supports prerm.
+#
+# IMPORTANT: Do NOT use dollar-brace shell syntax in this file.
+# electron-builder's fpm target treats dollar-brace-alpha as a template
+# macro and throws "Macro <name> is not defined" on unknown names.
+# Use $var (no braces) instead — it is valid POSIX shell.
+
+set -e
+
+UNIT="factory-update-manager.service"
+
+if command -v systemctl >/dev/null 2>&1; then
+    for user_dir in /run/user/*/; do
+        [ -d "$user_dir" ] || continue
+        uid=$(basename "$user_dir")
+        systemctl --user --machine="$uid@.host" stop "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$UNIT" >/dev/null 2>&1 || true
+    done
+fi
+
+exit 0

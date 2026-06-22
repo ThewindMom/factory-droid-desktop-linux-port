@@ -44,13 +44,21 @@ export const DEFAULT_RELEASE_MODE = ReleaseMode.Safe;
 
 /**
  * Resolve generated directory paths relative to project root.
+ *
+ * When the updater (factory-update-manager) drives a rebuild, it sets
+ * FACTORY_DIST_DIR / FACTORY_WORK_DIR / FACTORY_INSTALL_DIR to redirect
+ * outputs into a per-candidate workspace. This keeps the builder checkout
+ * clean and lets the updater find the produced .deb.
  */
 export function resolveDirs(projectRoot: string): Record<GeneratedDir, string> {
+  const envOverride = (key: string, fallback: string): string =>
+    process.env[key] || fallback;
+
   return {
-    work: path.join(projectRoot, "work"),
-    build: path.join(projectRoot, "build"),
-    dist: path.join(projectRoot, "dist"),
-    out: path.join(projectRoot, "out"),
+    work: envOverride("FACTORY_WORK_DIR", path.join(projectRoot, "work")),
+    build: envOverride("FACTORY_BUILD_DIR", path.join(projectRoot, "build")),
+    dist: envOverride("FACTORY_DIST_DIR", path.join(projectRoot, "dist")),
+    out: envOverride("FACTORY_OUT_DIR", path.join(projectRoot, "out")),
     ".cache": path.join(projectRoot, ".cache"),
   };
 }

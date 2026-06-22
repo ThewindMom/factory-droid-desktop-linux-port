@@ -18,9 +18,9 @@ import {
   BinaryClassificationResult,
   RuntimePayloadValidationResult,
 } from "../src/runtime-classifier";
+import { resolveFetchedDmg } from "./_helpers/fetched-dmg";
 
-// Reference DMG path
-const X64_DMG = "/home/thewind/Downloads/Factory-0.106.0-x64.dmg";
+const X64_DMG = resolveFetchedDmg("x64");
 const x64DmgAvailable = fs.existsSync(X64_DMG);
 const describeIfDmg = x64DmgAvailable ? describe : describe.skip;
 

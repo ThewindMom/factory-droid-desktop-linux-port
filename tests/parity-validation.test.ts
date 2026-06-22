@@ -18,9 +18,10 @@ import {
   ParityResult,
 } from "../src/parity-validation";
 
-// Reference DMG paths
-const X64_DMG = "/home/thewind/Downloads/Factory-0.106.0-x64.dmg";
-const ARM64_DMG = "/home/thewind/Downloads/Factory-0.106.0-arm64.dmg";
+import { resolveFetchedDmg } from "./_helpers/fetched-dmg";
+
+const X64_DMG = resolveFetchedDmg("x64");
+const ARM64_DMG = resolveFetchedDmg("arm64");
 const x64DmgAvailable = fs.existsSync(X64_DMG);
 const arm64DmgAvailable = fs.existsSync(ARM64_DMG);
 const bothDmgsAvailable = x64DmgAvailable && arm64DmgAvailable;

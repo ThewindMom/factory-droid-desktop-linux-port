@@ -13,10 +13,8 @@ import * as crypto from "crypto";
 import { execSync } from "child_process";
 import { classifyBinary, BinaryType } from "./runtime-classifier";
 import { readAsarPackageMetadata, type AsarPackageMetadata } from "./asar-metadata";
-import {
-  patchDaemonTransport,
-  type DaemonTransportPatchResult,
-} from "./daemon-transport-patch";
+import type { DaemonTransportPatchResult } from "./daemon-transport-patch";
+import { applyRegisteredPatches } from "./patches/registry";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -398,10 +396,25 @@ export async function assembleLinuxRuntime(
   // Step 4b: Patch daemon transport for Linux compatibility
   // VAL-DAEMON-001: Linux app must not emit --listen ipc
   // VAL-DAEMON-002: Daemon must reach healthy runtime state
-  const daemonTransportPatchResult = await patchDaemonTransport({
+  // Routed through the core patch registry (src/patches/registry.ts) so every
+  // Linux asar fix is discoverable, individually testable, and order-controlled.
+  const patchRegistryResult = await applyRegisteredPatches({
     asarPath: destAsarPath,
     tolerateMissingTarget: true,
   });
+  const daemonTransportPatchResult: DaemonTransportPatchResult = {
+    success: patchRegistryResult.success,
+    patched: patchRegistryResult.patched,
+    originalHash: patchRegistryResult.originalHash,
+    patchedHash: patchRegistryResult.finalHash,
+    patchCount: patchRegistryResult.outcomes.reduce(
+      (n, o) => n + o.patches.length,
+      0
+    ),
+    patches: patchRegistryResult.outcomes.flatMap((o) => o.patches),
+    errors: patchRegistryResult.errors,
+    warnings: patchRegistryResult.warnings,
+  };
 
   if (!daemonTransportPatchResult.success) {
     errors.push(

@@ -1,0 +1,13 @@
+[Unit]
+Description=Factory Desktop Update Manager
+Documentation=https://github.com/factory-droid-desktop-linux-port
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/factory-update-manager daemon
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

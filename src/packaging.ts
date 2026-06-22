@@ -230,6 +230,13 @@ export interface PackageBuildOptions {
    * .AppImage, or yml files from previous builds.
    */
   clean?: boolean;
+  /**
+   * Path to the pre-built factory-update-manager binary to bundle into the
+   * deb package. When set and PACKAGE_WITH_UPDATER != "0", the updater
+   * binary, systemd user service, and polkit policy are staged into the
+   * package so the installed app can auto-update from new upstream DMGs.
+   */
+  updaterBinaryPath?: string;
 }
 
 /** Result of package build */
@@ -446,7 +453,7 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
   }
 
   // Build electron-builder configuration
-  const builderConfig = createElectronBuilderConfig(options);
+  const builderConfig = createElectronBuilderConfig(options, process.cwd());
 
   // Write temporary electron-builder config
   const configPath = path.join(options.outputDir, "electron-builder-config.json");
@@ -578,11 +585,98 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     }
   }
 }
+/**
+ * Build the `extraFiles` entries for bundling the update manager into the deb
+ * package. Returns `undefined` when the updater should not be bundled
+ * (PACKAGE_WITH_UPDATER=0 or no binary path provided).
+ *
+ * The reference (codex-desktop-linux) bundles the updater by default and
+ * uses PACKAGE_WITH_UPDATER=0 to opt out. We mirror that contract.
+ *
+ * Files staged:
+ * - /usr/bin/factory-update-manager (the Rust binary)
+ * - /usr/lib/systemd/user/factory-update-manager.service (systemd --user unit)
+ * - /usr/share/polkit-1/actions/org.factory.desktop.update-manager.policy
+ *
+ * The builder checkout is also staged to /opt/factory-desktop/update-builder/
+ * so the updater can rebuild from new upstream DMGs without re-cloning.
+ */
+function buildUpdaterExtraFiles(
+  options: PackageBuildOptions,
+  projectRoot: string
+): { extraFiles: Array<{ from: string; to: string }> } | undefined {
+  // PACKAGE_WITH_UPDATER=0 opts out (default: include)
+  if (process.env.PACKAGE_WITH_UPDATER === "0") {
+    return undefined;
+  }
 
+  const updaterBinary =
+    options.updaterBinaryPath ||
+    path.join(projectRoot, "updater", "target", "release", "factory-update-manager");
+
+  if (!fs.existsSync(updaterBinary)) {
+    return undefined;
+  }
+
+  const packagingLinuxDir = path.join(projectRoot, "packaging", "linux");
+
+  const extraFiles: Array<{ from: string; to: string }> = [
+    // Updater binary → /usr/bin/
+    { from: updaterBinary, to: "/usr/bin/factory-update-manager" },
+  ];
+
+  // Systemd user service unit
+  const serviceFile = path.join(packagingLinuxDir, "factory-update-manager.service");
+  if (fs.existsSync(serviceFile)) {
+    extraFiles.push({
+      from: serviceFile,
+      to: "/usr/lib/systemd/user/factory-update-manager.service",
+    });
+  }
+
+  // Polkit policy
+  const polkitFile = path.join(
+    packagingLinuxDir,
+    "org.factory.desktop.update-manager.policy"
+  );
+  if (fs.existsSync(polkitFile)) {
+    extraFiles.push({
+      from: polkitFile,
+      to: "/usr/share/polkit-1/actions/org.factory.desktop.update-manager.policy",
+    });
+  }
+  // Stage the builder checkout to /opt/factory-desktop/update-builder/ so the
+  // updater can rebuild from new upstream DMGs without re-cloning. We stage the
+  // essential directories needed for a rebuild (dist/, node_modules/, src/,
+  // package.json, linux-features/, assets/).
+  const builderDirs = ["dist", "node_modules", "src", "linux-features", "assets"];
+  const updateBuilderRoot = "/opt/factory-desktop/update-builder";
+  for (const dir of builderDirs) {
+    const srcDir = path.join(projectRoot, dir);
+    if (fs.existsSync(srcDir)) {
+      extraFiles.push({
+        from: srcDir,
+        to: path.posix.join(updateBuilderRoot, dir),
+      });
+    }
+  }
+  // Essential root files
+  for (const file of ["package.json", "package-lock.json", "tsconfig.json"]) {
+    const srcFile = path.join(projectRoot, file);
+    if (fs.existsSync(srcFile)) {
+      extraFiles.push({
+        from: srcFile,
+        to: path.posix.join(updateBuilderRoot, file),
+      });
+    }
+  }
+
+  return { extraFiles };
+}
 /**
  * Create the electron-builder configuration object.
  */
-function createElectronBuilderConfig(options: PackageBuildOptions): Record<string, unknown> {
+export function createElectronBuilderConfig(options: PackageBuildOptions, projectRoot: string): Record<string, unknown> {
   const config: Record<string, unknown> = {
     appId: "com.factory.desktop",
     productName: options.appName,
@@ -621,10 +715,15 @@ function createElectronBuilderConfig(options: PackageBuildOptions): Record<strin
     },
     deb: {
       packageName: options.execName,
-      afterInstall: undefined,
-      afterRemove: undefined,
       depends: ["libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6", "xdg-utils"],
       maintainer: "Factory AI <hello@factory.ai>",
+      // Maintainer scripts for systemd --user service lifecycle.
+      // electron-builder's fpm target expands ${[a-zA-Z]+} macros in
+      // these scripts — the scripts use $uid (no braces) to avoid the
+      // "Macro uid is not defined" error.
+      afterInstall: "packaging/linux/factory-desktop.postinst",
+      afterRemove: "packaging/linux/factory-desktop.postrm",
+      ...(buildUpdaterExtraFiles(options, projectRoot) || {}),
     },
     appImage: {
       // AppImage-specific options

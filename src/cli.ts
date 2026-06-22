@@ -43,11 +43,49 @@ import {
   validateExistingDroid,
   formatDroidResult,
   VersionPolicy,
-  DROID_DOWNLOAD_URL_TEMPLATE,
-  DROID_SHA256_URL_TEMPLATE,
 } from "./droid-resolver";
+import {
+  fetchDesktopDmg,
+  formatDmgFetchResult,
+  isValidDarwinArch,
+  type DarwinArch,
+} from "./dmg-fetcher";
+import type { GeneratedDir } from "./config";
 
 const program = new Command();
+
+/**
+ * Resolve a DMG path: use --dmg if supplied, otherwise fetch the official
+ * Factory Desktop DMG from Factory's own desktop endpoint into work/.
+ */
+async function resolveDmgInput(
+  dmgOption: string | undefined,
+  dirs: Record<GeneratedDir, string>,
+  arch: DarwinArch,
+  expectedVersion?: string
+): Promise<string> {
+  if (dmgOption) return dmgOption;
+  process.stdout.write(
+    `No --dmg supplied; fetching the official Factory Desktop ${arch} DMG ` +
+      `from Factory's endpoint...
+`
+  );
+  const fetchResult = await fetchDesktopDmg({
+    arch,
+    destDir: dirs.work,
+    expectedVersion,
+  });
+  if (!fetchResult.success) {
+    process.stderr.write(
+      `Failed to fetch official DMG: ${fetchResult.errors.join("; ")}\n`
+    );
+    process.exit(1);
+  }
+  process.stdout.write(
+    `✓ Fetched ${arch} DMG (v${fetchResult.version || "unknown"}) -> ${fetchResult.dmgPath}\n`
+  );
+  return fetchResult.dmgPath;
+}
 
 program
   .name("factory-linux-builder")
@@ -100,7 +138,7 @@ program
 program
   .command("validate")
   .description("Validate a Factory Desktop DMG without extracting payloads")
-  .requiredOption("--dmg <path>", "Path to macOS x64 Factory Desktop DMG")
+  .option("--dmg <path>", "Path to macOS x64 Factory Desktop DMG (fetched from Factory if omitted)")
   .option(
     "--arm64-dmg <path>",
     "Path to macOS arm64 Factory Desktop DMG (optional, for parity checking)"
@@ -121,6 +159,8 @@ program
   .action(async (options) => {
     const releaseMode = resolveReleaseMode(options.releaseMode);
     process.stdout.write(`Release mode: ${describeReleaseMode(releaseMode)}\n`);
+    const dirs = resolveDirs(process.cwd());
+    options.dmg = await resolveDmgInput(options.dmg, dirs, "x64");
 
     // Validate the x64 DMG
     const result = validateDmg(options.dmg);
@@ -186,7 +226,7 @@ program
 program
   .command("extract")
   .description("Extract app payload from a Factory Desktop DMG")
-  .requiredOption("--dmg <path>", "Path to macOS x64 Factory Desktop DMG")
+  .option("--dmg <path>", "Path to macOS x64 Factory Desktop DMG (fetched from Factory if omitted)")
   .option(
     "--arm64-dmg <path>",
     "Path to macOS arm64 Factory Desktop DMG (optional)"
@@ -218,6 +258,8 @@ program
     const dirs = resolveDirs(projectRoot);
 
     process.stdout.write(`Release mode: ${describeReleaseMode(releaseMode)}\n`);
+
+    options.dmg = await resolveDmgInput(options.dmg, dirs, "x64");
 
     // Check required tools first
     assertRequiredTools();
@@ -804,6 +846,7 @@ program
         iconPath: options.iconPath,
         desktopEntryPath: options.desktopEntry,
         releaseMode,
+        updaterBinaryPath: path.join(process.cwd(), "updater", "target", "release", "factory-update-manager"),
       });
 
       process.stdout.write(`\n${formatPackageBuildResult(buildResult)}\n`);
@@ -1106,10 +1149,8 @@ program
     process.stdout.write(
       `Factory version: ${options.factoryVersion}\n` +
         `Version policy: ${versionPolicy}\n` +
-        `Download URL template: ${DROID_DOWNLOAD_URL_TEMPLATE}\n` +
-        `Checksum URL template: ${DROID_SHA256_URL_TEMPLATE}\n`
+        `Download source: npm (@factory/cli-linux-x64)\n`
     );
-
     const outputDir = options.outputDir || path.join(dirs.work, "droid");
     const timeoutMs = parseInt(options.timeout, 10);
 
@@ -2573,7 +2614,12 @@ program
 program
   .command("build-all")
   .description("One-command build: from DMG to launchable Linux app packages")
-  .requiredOption("--dmg <path>", "Path to macOS x64 Factory Desktop DMG")
+  .option("--dmg <path>", "Path to macOS x64 Factory Desktop DMG (fetched from Factory if omitted)")
+  .option(
+    "--fetch-arch <arch>",
+    "Architecture to fetch from Factory when --dmg is omitted (x64 or arm64)",
+    "x64"
+  )
   .option(
     "--arm64-dmg <path>",
     "Path to macOS arm64 Factory Desktop DMG (optional, for parity checking)"
@@ -2645,6 +2691,16 @@ program
     const projectRoot = process.cwd();
     const dirs = resolveDirs(projectRoot);
     const targets = options.targets.split(",").map((t: string) => t.trim());
+
+    const fetchArch: DarwinArch = isValidDarwinArch(options.fetchArch)
+      ? options.fetchArch
+      : "x64";
+    options.dmg = await resolveDmgInput(
+      options.dmg,
+      dirs,
+      fetchArch,
+      options.factoryVersion
+    );
 
     process.stdout.write(
       `\n╔══════════════════════════════════════════════════════════════╗\n` +
@@ -2816,6 +2872,29 @@ program
       process.stdout.write(`✓ Linux app assembled: ${appDir}\n`);
       process.stdout.write(`  Executable: ${assembleResult.executablePath}\n`);
 
+      // Write build-info.json so the update manager (factory-update-manager)
+      // can detect whether a candidate DMG is already installed by comparing
+      // the upstream DMG SHA-256.
+      const factoryLinuxDir = path.join(appDir, ".factory-linux");
+      fs.mkdirSync(factoryLinuxDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(factoryLinuxDir, "build-info.json"),
+        JSON.stringify(
+          {
+            upstreamDmg: {
+              sha256: asarHash,
+              version: selectedVersion,
+              path: options.dmg,
+            },
+            factoryVersion: selectedVersion,
+            electronVersion: options.electronVersion,
+            buildTimestamp: new Date().toISOString(),
+          },
+          null,
+          2
+        ) + "\n"
+      );
+
       // Validate if requested
       if (options.validate) {
         const layoutResult = validateRuntimeLayout(appDir);
@@ -2919,6 +2998,7 @@ program
         desktopEntryPath: desktopResult.desktopFilePath,
         outputDir: dirs.dist,
         releaseMode,
+        updaterBinaryPath: path.join(projectRoot, "updater", "target", "release", "factory-update-manager"),
       });
 
       if (!packageResult.success) {
@@ -3030,7 +3110,8 @@ program
 
       process.stdout.write(
         `\nTo validate the built app launches and shows the Factory UI shell:\n` +
-        `  node dist/cli.js build-all --dmg ${options.dmg} --factory-version ${selectedVersion} --validate --validate-ui\n\n` +
+        `  node dist/cli.js build-all --factory-version ${selectedVersion} --validate --validate-ui\n` +
+        `   (the DMG is fetched automatically from Factory when --dmg is omitted)\n\n` +
         `To launch diagnostics on the assembled app:\n` +
         `  node dist/cli.js launch-diagnostics --app-dir ${appDir} --all\n`
       );
@@ -3742,6 +3823,38 @@ program
       `\n✓ Daemon transport validation passed. The Linux app uses a ` +
       `droid-supported daemon transport.\n`
     );
+  });
+
+/**
+ * `fetch-dmg` subcommand: download the official Factory Desktop DMG directly
+ * from Factory's own desktop endpoint (no manual --dmg needed).
+ */
+program
+  .command("fetch-dmg")
+  .description("Download the official Factory Desktop DMG from Factory's endpoint")
+  .requiredOption("--arch <arch>", "Architecture to fetch: x64 or arm64")
+  .option("--dest <dir>", "Destination directory (default: ./work)", "")
+  .option("--expected-version <version>", "Assert the served version matches")
+  .action(async (options) => {
+    if (!isValidDarwinArch(options.arch)) {
+      process.stderr.write(
+        `Invalid --arch "${options.arch}". Must be "x64" or "arm64".\n`
+      );
+      process.exit(1);
+    }
+    const projectRoot = process.cwd();
+    const dirs = resolveDirs(projectRoot);
+    const destDir = options.dest || dirs.work;
+    process.stdout.write(
+      `Fetching official Factory Desktop ${options.arch} DMG from Factory...\n`
+    );
+    const result = await fetchDesktopDmg({
+      arch: options.arch,
+      destDir,
+      expectedVersion: options.expectedVersion,
+    });
+    process.stdout.write(formatDmgFetchResult(result) + "\n");
+    if (!result.success) process.exit(1);
   });
 
 program.parse();

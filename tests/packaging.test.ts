@@ -13,6 +13,7 @@ import * as os from "os";
 import * as crypto from "crypto";
 import { execSync } from "child_process";
 import {
+  createElectronBuilderConfig,
   buildPackages,
   validateDebPackage,
   validatePackagedDroid,
@@ -981,6 +982,56 @@ describe("packaging", () => {
       } finally {
         cleanupTempDir(tempDir);
       }
+    });
+  });
+
+  // ─── Maintainer Script Macro Regression ────────────────────────────────────
+  // electron-builder's fpm target runs /\${([a-zA-Z]+)}/g over
+  // afterInstall/afterRemove scripts. Unknown macros throw
+  // "Macro <name> is not defined". The scripts use $uid (no braces)
+  // to avoid this.
+  describe("maintainer script macro safety", () => {
+    const scripts = [
+      "packaging/linux/factory-desktop.postinst",
+      "packaging/linux/factory-desktop.postrm",
+    ];
+
+    for (const script of scripts) {
+      test(`${path.basename(script)} has no fpm macro-expansion triggers`, () => {
+        const content = fs.readFileSync(script, "utf8");
+        const macroRegex = /\$\{([a-zA-Z]+)\}/g;
+        const matches: string[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = macroRegex.exec(content)) !== null) {
+          matches.push(m[1]);
+        }
+        expect(matches).toEqual([]);
+      });
+
+      test(`${path.basename(script)} uses $uid without braces`, () => {
+        const content = fs.readFileSync(script, "utf8");
+        // The script must reference uid via $uid, not ${uid}
+        expect(content).toMatch(/\$uid/);
+        expect(content).not.toMatch(/\$\{uid\}/);
+      });
+    }
+
+    test("deb config wires afterInstall and afterRemove", () => {
+      const config = createElectronBuilderConfig(
+        {
+          appDir: "/tmp/mock-app",
+          outputDir: "/tmp/mock-dist",
+          factoryVersion: "0.106.0",
+          appName: "Factory",
+          execName: "factory-desktop",
+          targets: ["deb"],
+          releaseMode: ReleaseMode.Safe,
+        },
+        process.cwd()
+      );
+      const deb = config.deb as Record<string, unknown>;
+      expect(deb.afterInstall).toBe("packaging/linux/factory-desktop.postinst");
+      expect(deb.afterRemove).toBe("packaging/linux/factory-desktop.postrm");
     });
   });
 });

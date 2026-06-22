@@ -1,0 +1,8 @@
+{
+  "id": "example-integration",
+  "name": "Example Integration",
+  "description": "Template for an optional Linux integration. Disabled by default; copy this directory and flip `enabled` to true to activate.",
+  "enabled": false,
+  "distros": [],
+  "notes": "This feature ships no behavior. It exists to document the feature.json contract."
+}
