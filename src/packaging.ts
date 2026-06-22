@@ -556,31 +556,11 @@ function buildUpdaterExtraFiles(
       to: ".factory-linux/updater/org.factory.desktop.update-manager.policy",
     });
   }
-
-  // Stage the builder checkout so the updater can rebuild from new upstream
-  // DMGs without re-cloning. These go into .factory-linux/update-builder/
-  // within the app dir; postinst moves them to /opt/factory-desktop/update-builder/.
-  const builderDirs = ["dist", "node_modules", "src", "assets"];
-  const builderBase = ".factory-linux/update-builder";
-  for (const dir of builderDirs) {
-    const srcDir = path.join(projectRoot, dir);
-    if (fs.existsSync(srcDir)) {
-      extraFiles.push({
-        from: srcDir,
-        to: path.posix.join(builderBase, dir),
-      });
-    }
-  }
-  // Essential root files
-  for (const file of ["package.json", "package-lock.json", "tsconfig.json"]) {
-    const srcFile = path.join(projectRoot, file);
-    if (fs.existsSync(srcFile)) {
-      extraFiles.push({
-        from: srcFile,
-        to: path.posix.join(builderBase, file),
-      });
-    }
-  }
+  // Note: The builder checkout (dist, node_modules, src, assets, package.json,
+  // etc.) is staged manually by the build-all command in cli.ts, NOT via
+  // extraFiles. electron-builder's --prepackaged mode skips extraFiles, so
+  // they would be dead weight here. The staging in cli.ts also prunes
+  // devDependencies from node_modules to reduce package size.
 
   return { extraFiles };
 }
