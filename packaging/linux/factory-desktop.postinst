@@ -49,6 +49,19 @@ if [ -d "$BUILDER_STAGED" ]; then
     mkdir -p /opt/factory-desktop
     cp -r "$BUILDER_STAGED" /opt/factory-desktop/update-builder
 fi
+# Create the ~/.factory/automations directory for each logged-in user.
+# The app checks for this directory on startup and logs an ENOENT warning
+# if it doesn't exist. Creating it here suppresses the warning.
+if command -v systemctl >/dev/null 2>&1; then
+    for user_dir in /run/user/*/; do
+        [ -d "$user_dir" ] || continue
+        uid=$(basename "$user_dir")
+        home_dir=$(getent passwd "$uid" | cut -d: -f6)
+        [ -n "$home_dir" ] && [ -d "$home_dir" ] || continue
+        mkdir -p "$home_dir/.factory/automations" 2>/dev/null || true
+        chown "$uid" "$home_dir/.factory/automations" 2>/dev/null || true
+    done
+fi
 
 # Refresh icon cache so GNOME/taskbar picks up the installed hicolor icons.
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then

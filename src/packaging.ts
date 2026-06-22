@@ -16,7 +16,6 @@ import * as crypto from "crypto";
 import { execSync, spawnSync } from "child_process";
 import { ReleaseMode } from "./config";
 import { checkTool } from "./tool-check";
-
 // ─── RPM Deferral (VAL-PACKAGE-010) ─────────────────────────────────────────
 
 /** Reasons why RPM build is deferred */
@@ -52,30 +51,12 @@ export interface RpmPrerequisiteCheckResult {
  * deferred-status diagnostic.
  */
 export function checkRpmPrerequisites(): RpmPrerequisiteCheckResult {
-  const reasons: RpmDeferralReason[] = [];
-
-  // Check for rpmbuild
+  // electron-builder requires `rpmbuild` on the host to build RPM targets.
+  // Unlike deb (which uses fpm), RPM builds call rpmbuild directly.
   const rpmTool = { name: "rpmbuild", description: "RPM builder", required: false };
   const rpmCheck = checkTool(rpmTool);
-  const hasRpmbuild = rpmCheck.available;
 
-  // Check for Docker availability
-  const dockerTool = { name: "docker", description: "Docker container runtime", required: false };
-  const dockerCheck = checkTool(dockerTool);
-  const hasDocker = dockerCheck.available;
-
-  // Check for approved Docker build strategy
-  // This is an environment variable that must be explicitly set to opt in
-  const dockerRpmApproved =
-    process.env.FACTORY_RPM_DOCKER_STRATEGY === "approved";
-
-  // Check if Docker-based RPM build pipeline is verified functional
-  // (i.e., an actual working Docker-based RPM build exists, not just a policy flag)
-  const dockerRpmVerified =
-    process.env.FACTORY_RPM_DOCKER_VERIFIED === "true";
-
-  if (hasRpmbuild) {
-    // rpmbuild is available - RPM builds can proceed directly
+  if (rpmCheck.available) {
     return {
       available: true,
       reasons: [],
@@ -83,65 +64,12 @@ export function checkRpmPrerequisites(): RpmPrerequisiteCheckResult {
     };
   }
 
-  // rpmbuild not available
-  reasons.push(RpmDeferralReason.NoRpmbuild);
-
-  // Check if we have a fully verified Docker-based RPM build pipeline
-  if (hasDocker && dockerRpmApproved && dockerRpmVerified) {
-    return {
-      available: true,
-      reasons: [],
-      diagnostic:
-        "rpmbuild is not installed, but a verified Docker-based RPM build pipeline is available.",
-    };
-  }
-
-  // Check individual deferral reasons
-  if (!hasDocker) {
-    reasons.push(RpmDeferralReason.NoDocker);
-  } else if (!dockerRpmApproved) {
-    reasons.push(RpmDeferralReason.DockerNotApproved);
-  }
-
-  const diagnosticLines: string[] = [
-    "RPM target is DEFERRED on this host:",
-  ];
-
-  if (reasons.includes(RpmDeferralReason.NoRpmbuild)) {
-    diagnosticLines.push(
-      "  - rpmbuild is not installed. Install rpmbuild (e.g., sudo apt install rpm) to enable RPM builds."
-    );
-  }
-
-  if (reasons.includes(RpmDeferralReason.NoDocker)) {
-    diagnosticLines.push(
-      "  - Docker is not available. A Docker-based RPM build path could be used as an alternative."
-    );
-  }
-
-  if (reasons.includes(RpmDeferralReason.DockerNotApproved)) {
-    diagnosticLines.push(
-      "  - Docker is available but no RPM build strategy has been approved. " +
-      "Set FACTORY_RPM_DOCKER_STRATEGY=approved to enable Docker-based RPM builds."
-    );
-  }
-
-  // Even if Docker strategy is approved, the pipeline must also be verified
-  if (hasDocker && dockerRpmApproved && !dockerRpmVerified) {
-    diagnosticLines.push(
-      "  - Docker RPM build strategy is approved but the build pipeline is not yet verified. " +
-      "Set FACTORY_RPM_DOCKER_VERIFIED=true once a working Docker-based RPM build is in place."
-    );
-  }
-
-  diagnosticLines.push(
-    "RPM support will be added when rpmbuild or an approved Docker-based build path is available."
-  );
-
   return {
     available: false,
-    reasons,
-    diagnostic: diagnosticLines.join("\n"),
+    reasons: [RpmDeferralReason.NoRpmbuild],
+    diagnostic:
+      "rpmbuild is not installed. Install it with: sudo apt install rpm (Debian/Ubuntu) " +
+      "or sudo dnf install rpm-build (Fedora). RPM target is deferred until rpmbuild is available.",
   };
 }
 
@@ -249,6 +177,8 @@ export interface PackageBuildResult {
   debPath?: string;
   /** AppImage path (if appimage target) */
   appImagePath?: string;
+  /** RPM package path (if rpm target) */
+  rpmPath?: string;
   /** Build errors */
   errors: string[];
   /** Build warnings */
@@ -538,6 +468,7 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     // Verify we got the expected artifacts
     const debPath = artifacts.find((a) => a.endsWith(".deb"));
     const appImagePath = artifacts.find((a) => a.endsWith(".AppImage"));
+    const rpmPath = artifacts.find((a) => a.endsWith(".rpm"));
 
     if (validTargets.includes("deb") && !debPath) {
       errors.push("Debian package (.deb) was not produced.");
@@ -547,30 +478,15 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
       errors.push("AppImage was not produced.");
     }
 
-    // VAL-PACKAGE-010: Verify no partial .rpm artifacts were produced
-    const partialRpmFiles = findPartialRpmArtifacts(options.outputDir);
-    if (partialRpmFiles.length > 0) {
-      errors.push(
-        `Unexpected .rpm artifacts found in output directory. ` +
-        `RPM is deferred and no .rpm files should be produced. ` +
-        `Files: ${partialRpmFiles.join(", ")}`
-      );
-      // Clean up the partial RPM artifacts
-      for (const rpmFile of partialRpmFiles) {
-        try {
-          fs.unlinkSync(rpmFile);
-          warnings.push(`Removed unexpected partial RPM artifact: ${path.basename(rpmFile)}`);
-        } catch {
-          // Best-effort cleanup
-        }
-      }
+    if (validTargets.includes("rpm") && !rpmPath) {
+      errors.push("RPM package (.rpm) was not produced.");
     }
-
     return {
       success: errors.length === 0,
       artifacts,
       debPath,
       appImagePath,
+      rpmPath,
       errors,
       warnings,
     };
@@ -720,13 +636,15 @@ export function createElectronBuilderConfig(options: PackageBuildOptions, projec
         GenericName: "AI Development Environment",
       },
       target: options.targets
-        .filter((t) => t !== "rpm")
         .map((t) => {
           if (t === "deb") {
             return { target: "deb", arch: ["x64"] };
           }
           if (t === "appimage") {
             return { target: "AppImage", arch: ["x64"] };
+          }
+          if (t === "rpm") {
+            return { target: "rpm", arch: ["x64"] };
           }
           return t;
         }),
@@ -739,6 +657,14 @@ export function createElectronBuilderConfig(options: PackageBuildOptions, projec
       // electron-builder's fpm target expands ${[a-zA-Z]+} macros in
       // these scripts — the scripts use $uid (no braces) to avoid the
       // "Macro uid is not defined" error.
+      afterInstall: "packaging/linux/factory-desktop.postinst",
+      afterRemove: "packaging/linux/factory-desktop.postrm",
+    },
+    rpm: {
+      // RPM uses the same maintainer scripts as deb.
+      // fpm maps afterInstall → %post and afterRemove → %postun.
+      packageName: options.execName,
+      depends: ["gtk3", "libnotify", "nss", "libXScrnSaver", "libXtst", "xdg-utils"],
       afterInstall: "packaging/linux/factory-desktop.postinst",
       afterRemove: "packaging/linux/factory-desktop.postrm",
     },
@@ -797,6 +723,13 @@ function findArtifacts(
     }
 
     if (targets.includes("appimage") && entry.endsWith(".AppImage")) {
+      if (entry.includes(options.factoryVersion) || entry.includes(options.execName)) {
+        artifacts.push(fullPath);
+      } else {
+        artifacts.push(fullPath);
+      }
+    }
+    if (targets.includes("rpm") && entry.endsWith(".rpm")) {
       if (entry.includes(options.factoryVersion) || entry.includes(options.execName)) {
         artifacts.push(fullPath);
       } else {
@@ -1614,6 +1547,9 @@ export function formatPackageBuildResult(result: PackageBuildResult): string {
   }
   if (result.appImagePath) {
     lines.push(`AppImage: ${result.appImagePath}`);
+  }
+  if (result.rpmPath) {
+    lines.push(`RPM package: ${result.rpmPath}`);
   }
 
   if (result.warnings.length > 0) {

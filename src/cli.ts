@@ -689,7 +689,7 @@ program
   .description("Package the assembled Linux app into target formats")
   .option(
     "--targets <targets>",
-    "Comma-separated target formats (deb,appimage)",
+    "Comma-separated target formats (deb,rpm,appimage)",
     "deb,appimage"
   )
   .option(
@@ -1027,6 +1027,7 @@ program
         `  Artifacts: ${buildResult.artifacts.length}\n` +
         (buildResult.debPath ? `  Debian: ${buildResult.debPath}\n` : "") +
         (buildResult.appImagePath ? `  AppImage: ${buildResult.appImagePath}\n` : "") +
+        (buildResult.rpmPath ? `  RPM: ${buildResult.rpmPath}\n` : "") +
         `  Version: ${factoryVersion}\n`
       );
     } catch (err) {
@@ -2271,7 +2272,7 @@ program
     if (fs.existsSync(outputDir)) {
       const entries = fs.readdirSync(outputDir);
       for (const entry of entries) {
-        if (entry.endsWith(".deb") || entry.endsWith(".AppImage")) {
+        if (entry.endsWith(".deb") || entry.endsWith(".AppImage") || entry.endsWith(".rpm")) {
           artifactPaths.push(path.join(outputDir, entry));
         }
       }
@@ -2279,7 +2280,7 @@ program
 
     if (artifactPaths.length === 0) {
       process.stderr.write(
-        `No .deb or AppImage artifacts found in ${outputDir}. ` +
+        `No .deb, .rpm, or AppImage artifacts found in ${outputDir}. ` +
         `Run the package command first.\n`
       );
       process.exit(1);
@@ -2649,7 +2650,7 @@ program
   )
   .option(
     "--targets <targets>",
-    "Comma-separated package targets (deb,appimage)",
+    "Comma-separated package targets (deb,rpm,appimage)",
     "deb,appimage"
   )
   .option(

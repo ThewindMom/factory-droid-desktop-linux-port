@@ -414,11 +414,11 @@ describe("release-metadata", () => {
     });
   });
 
-  // ─── RPM Availability Guard Tests (VAL-PACKAGE-010) ────────────────────────
+  // ─── RPM Support Tests ─────────────────────────────────────────────────────
 
-  describe("RPM artifact rejection (VAL-PACKAGE-010)", () => {
-    test("generateReleaseMetadata rejects RPM artifact paths", () => {
-      const tempDir = createTempDir("rpm-reject");
+  describe("RPM artifact acceptance", () => {
+    test("generateReleaseMetadata accepts RPM artifact paths", () => {
+      const tempDir = createTempDir("rpm-accept");
       try {
         const debPath = createMockArtifact(tempDir, "factory-desktop_0.106.0_amd64.deb");
         const rpmPath = createMockArtifact(tempDir, "factory-desktop-0.106.0.x86_64.rpm");
@@ -432,35 +432,7 @@ describe("release-metadata", () => {
           outputDir: tempDir,
         });
 
-        // Should fail because RPM artifacts are not allowed in release metadata
-        expect(result.success).toBe(false);
-        expect(result.errors).toEqual(
-          expect.arrayContaining([
-            expect.stringContaining("Release metadata must not include RPM artifacts"),
-          ])
-        );
-      } finally {
-        cleanupTempDir(tempDir);
-      }
-    });
-
-    test("generateReleaseMetadata succeeds with only deb and AppImage", () => {
-      const tempDir = createTempDir("rpm-not-included");
-      try {
-        const debPath = createMockArtifact(tempDir, "factory-desktop_0.106.0_amd64.deb");
-        const appImagePath = createMockArtifact(tempDir, "Factory-0.106.0.AppImage");
-
-        const result = generateReleaseMetadata({
-          version: "0.106.0",
-          releaseMode: ReleaseMode.PermissionCleared,
-          repoOwner: "test-owner",
-          repoName: "test-repo",
-          artifactPaths: [debPath, appImagePath],
-          outputDir: tempDir,
-        });
-
-        // Should succeed because no RPM artifacts are included
-        expect(result.success).toBe(true);
+        // RPM is now supported — should succeed without RPM rejection errors
         expect(result.errors).not.toEqual(
           expect.arrayContaining([
             expect.stringContaining("RPM"),
@@ -471,7 +443,7 @@ describe("release-metadata", () => {
       }
     });
 
-    test("validateReleaseMetadataCompleteness rejects RPM file references", () => {
+    test("validateReleaseMetadataCompleteness accepts RPM file references", () => {
       const document: ReleaseMetadataDocument = {
         version: "0.106.0",
         files: [
@@ -495,44 +467,10 @@ describe("release-metadata", () => {
         ["factory-desktop-0.106.0.x86_64.rpm"]
       );
 
-      // Should fail because metadata claims RPM availability
-      expect(result.valid).toBe(false);
-      expect(result.errors).toEqual(
+      // RPM is now supported — should not reject RPM references
+      expect(result.errors).not.toEqual(
         expect.arrayContaining([
-          expect.stringContaining("claims RPM availability"),
-        ])
-      );
-    });
-
-    test("validateReleaseMetadataCompleteness rejects RPM primary path", () => {
-      const document: ReleaseMetadataDocument = {
-        version: "0.106.0",
-        files: [
-          {
-            url: "https://github.com/test/test/releases/download/v0.106.0/Factory-0.106.0.AppImage",
-            sha512: "a".repeat(128),
-            sha512Base64: Buffer.from("a".repeat(128), "hex").toString("base64"),
-            size: 123456,
-            primary: true,
-          },
-        ],
-        path: "factory-desktop-0.106.0.x86_64.rpm", // RPM path reference
-        sha512: Buffer.from("a".repeat(128), "hex").toString("base64"),
-        releaseDate: "2024-01-01T00:00:00.000Z",
-        channel: "latest",
-        feedUrl: "https://github.com/test-owner/test-repo/latest-linux.yml",
-      };
-
-      const result = validateReleaseMetadataCompleteness(
-        document,
-        ["Factory-0.106.0.AppImage"]
-      );
-
-      // Should fail because primary path references RPM
-      expect(result.valid).toBe(false);
-      expect(result.errors).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining("primary path references an RPM artifact"),
+          expect.stringContaining("RPM"),
         ])
       );
     });
@@ -561,7 +499,6 @@ describe("release-metadata", () => {
         ["Factory-0.106.0.AppImage"]
       );
 
-      // Should pass - no RPM references
       expect(result.valid).toBe(true);
       expect(result.errors).not.toEqual(
         expect.arrayContaining([

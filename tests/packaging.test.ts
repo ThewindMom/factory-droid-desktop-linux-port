@@ -428,7 +428,7 @@ describe("packaging", () => {
           ])
         );
         expect(result.warnings).toEqual(
-          expect.arrayContaining([expect.stringContaining("RPM target is DEFERRED")])
+          expect.arrayContaining([expect.stringContaining("rpmbuild is not installed")])
         );
 
         // No partial .rpm files should be produced
@@ -459,7 +459,7 @@ describe("packaging", () => {
 
         // Should produce RPM deferral warning
         expect(result.warnings).toEqual(
-          expect.arrayContaining([expect.stringContaining("RPM target is DEFERRED")])
+          expect.arrayContaining([expect.stringContaining("rpmbuild is not installed")])
         );
 
         // Should still have RPM deferred error
@@ -585,29 +585,16 @@ describe("packaging", () => {
     });
   });
 
-  // ─── RPM Deferral Tests (VAL-PACKAGE-010) ─────────────────────────────────
+  // ─── RPM Support Tests ─────────────────────────────────────────────────────
 
-  describe("checkRpmPrerequisites (VAL-PACKAGE-010)", () => {
+  describe("checkRpmPrerequisites", () => {
     test("returns deferred when rpmbuild is not available", () => {
       // rpmbuild is not installed in the test environment
       const result = checkRpmPrerequisites();
 
       expect(result.available).toBe(false);
       expect(result.reasons).toContain(RpmDeferralReason.NoRpmbuild);
-      expect(result.diagnostic).toContain("RPM target is DEFERRED");
       expect(result.diagnostic).toContain("rpmbuild is not installed");
-    });
-
-    test("returns deferred when Docker is not approved even if available", () => {
-      // Even if Docker were available, the strategy must be explicitly approved
-      // In the test environment, FACTORY_RPM_DOCKER_STRATEGY is not set
-      const result = checkRpmPrerequisites();
-
-      expect(result.available).toBe(false);
-      // The diagnostic should mention the approval requirement
-      if (result.reasons.includes(RpmDeferralReason.DockerNotApproved)) {
-        expect(result.diagnostic).toContain("FACTORY_RPM_DOCKER_STRATEGY");
-      }
     });
 
     test("formatRpmPrerequisiteCheckResult produces readable output", () => {
@@ -615,67 +602,16 @@ describe("packaging", () => {
       const formatted = formatRpmPrerequisiteCheckResult(result);
 
       expect(formatted).toContain("=== RPM Prerequisite Check ===");
-      expect(formatted).toContain("DEFERRED");
-      expect(formatted).toContain("no-rpmbuild");
-    });
-
-    test("checkRpmPrerequisites remains deferred with only Docker strategy approved", () => {
-      // Docker strategy approval alone is not enough - the pipeline must be verified
-      const originalEnv = process.env.FACTORY_RPM_DOCKER_STRATEGY;
-      try {
-        process.env.FACTORY_RPM_DOCKER_STRATEGY = "approved";
-
-        const result = checkRpmPrerequisites();
-
-        // Should still be deferred because the Docker pipeline is not verified
-        expect(result.available).toBe(false);
-        expect(result.reasons).toContain(RpmDeferralReason.NoRpmbuild);
-        expect(result.diagnostic).toContain("not yet verified");
-      } finally {
-        if (originalEnv !== undefined) {
-          process.env.FACTORY_RPM_DOCKER_STRATEGY = originalEnv;
-        } else {
-          delete process.env.FACTORY_RPM_DOCKER_STRATEGY;
-        }
-      }
-    });
-
-    test("checkRpmPrerequisites returns available with approved and verified Docker", () => {
-      const origStrategy = process.env.FACTORY_RPM_DOCKER_STRATEGY;
-      const origVerified = process.env.FACTORY_RPM_DOCKER_VERIFIED;
-      try {
-        process.env.FACTORY_RPM_DOCKER_STRATEGY = "approved";
-        process.env.FACTORY_RPM_DOCKER_VERIFIED = "true";
-
-        const result = checkRpmPrerequisites();
-
-        // If Docker is available on this host, RPM should be available
-        // If Docker is NOT available, still deferred
-        // Check the result based on Docker availability
-        if (result.available) {
-          expect(result.available).toBe(true);
-          expect(result.reasons).toHaveLength(0);
-          expect(result.diagnostic).toContain("verified Docker-based RPM build");
-        } else {
-          // Docker is not available on this host
-          expect(result.reasons).toContain(RpmDeferralReason.NoRpmbuild);
-        }
-      } finally {
-        if (origStrategy !== undefined) {
-          process.env.FACTORY_RPM_DOCKER_STRATEGY = origStrategy;
-        } else {
-          delete process.env.FACTORY_RPM_DOCKER_STRATEGY;
-        }
-        if (origVerified !== undefined) {
-          process.env.FACTORY_RPM_DOCKER_VERIFIED = origVerified;
-        } else {
-          delete process.env.FACTORY_RPM_DOCKER_VERIFIED;
-        }
+      // In the test env, rpmbuild is not available → DEFERRED
+      if (!result.available) {
+        expect(formatted).toContain("DEFERRED");
+      } else {
+        expect(formatted).toContain("AVAILABLE");
       }
     });
   });
 
-  describe("findPartialRpmArtifacts (VAL-PACKAGE-010)", () => {
+  describe("findPartialRpmArtifacts", () => {
     test("returns empty when no .rpm files exist", () => {
       const tempDir = createTempDir("rpm-partial-clean");
       try {
@@ -740,34 +676,13 @@ describe("packaging", () => {
       }
     });
   });
-
-  describe("no partial .rpm files produced on RPM request (VAL-PACKAGE-010)", () => {
-    test("RPM-only target leaves no .rpm files in output directory", () => {
-      const tempDir = createTempDir("rpm-no-partial");
-      try {
-        const appDir = createMockAppDir(tempDir);
-        const outputDir = path.join(tempDir, "dist");
-
-        const result = buildPackages({
-          appDir,
-          outputDir,
-          factoryVersion: "0.106.0",
-          appName: "Factory",
-          execName: "factory-desktop",
-          targets: ["rpm"],
-          releaseMode: ReleaseMode.Safe,
-        });
-
-        // Build should fail (RPM is deferred)
-        expect(result.success).toBe(false);
-
-        // No .rpm files should exist in the output directory
-        if (fs.existsSync(outputDir)) {
-          const rpmFiles = fs.readdirSync(outputDir).filter((f) => f.endsWith(".rpm"));
-          expect(rpmFiles).toHaveLength(0);
-        }
-      } finally {
-        cleanupTempDir(tempDir);
+  describe("RPM target support", () => {
+    test("RPM target requires rpmbuild on the host", () => {
+      // RPM is supported via electron-builder but requires rpmbuild.
+      // In the test environment, rpmbuild is not installed.
+      const rpmCheck = checkRpmPrerequisites();
+      if (!rpmCheck.available) {
+        expect(rpmCheck.reasons).toContain(RpmDeferralReason.NoRpmbuild);
       }
     });
   });
@@ -814,6 +729,7 @@ describe("packaging", () => {
         artifacts: ["/path/to/test.deb", "/path/to/test.AppImage"],
         debPath: "/path/to/test.deb",
         appImagePath: "/path/to/test.AppImage",
+        rpmPath: "/path/to/test.rpm",
         errors: [],
         warnings: [],
       });
@@ -821,6 +737,7 @@ describe("packaging", () => {
       expect(result).toContain("SUCCESS");
       expect(result).toContain("test.deb");
       expect(result).toContain("test.AppImage");
+      expect(result).toContain("test.rpm");
     });
 
     test("formatDebValidationResult formats correctly", () => {

@@ -91,6 +91,13 @@ fn sync_runtime_state(config: &RuntimeConfig, state: &mut PersistedState) {
         state.waiting_for_app_exit_auto_install = false;
     }
     state.installed_version = install::installed_package_version();
+    // Sync the installed port SHA from build-info.json here (not only in
+    // run_check_cycle) so that complete_pending_install_if_already_installed
+    // can correctly compare port SHAs even when the check cycle is skipped
+    // due to a pending update. Without this, a stale ready_to_install state
+    // deadlocks the daemon: the check cycle skips (pending), but the SHA
+    // needed to clear the pending state is never synced.
+    sync_installed_port_sha(config, state);
 }
 
 fn sync_and_persist(
@@ -372,7 +379,6 @@ async fn run_check_cycle(
     let client = Client::builder().build()?;
 
     sync_runtime_state(config, state);
-    sync_installed_port_sha(config, state);
     state.status = UpdateStatus::CheckingUpstream;
     state.last_check_at = Some(Utc::now());
     state.error_message = None;
