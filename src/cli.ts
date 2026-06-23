@@ -2898,6 +2898,7 @@ program
               path: options.dmg,
             },
             factoryVersion: selectedVersion,
+            droidVersion: droidResult.droidVersion ?? null,
             electronVersion: options.electronVersion,
             buildTimestamp: new Date().toISOString(),
             portBuildSha: process.env.GITHUB_SHA ?? null,

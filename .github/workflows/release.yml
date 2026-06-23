@@ -81,7 +81,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev xz-utils rpm
+          sudo apt-get install -y dpkg-dev xz-utils rpm libfuse2
           # Install 7-Zip 26.01 from 7-zip.org — NOT p7zip-full (16.02).
           # p7zip 16.02 cannot decompress LZFSE-compressed Apple DMGs.
           # The ubuntu 7zip package (21.07) has a Headers Error bug on
@@ -104,7 +104,7 @@ jobs:
 
       - name: Build Linux app and package
         run: |
-          node dist/cli.js build-all --targets deb,rpm
+          node dist/cli.js build-all --targets deb,rpm,appimage
 
       - name: Verify .deb was produced
         run: |
@@ -116,6 +116,7 @@ jobs:
           echo "DEB_PATH=$DEB" >> $GITHUB_ENV
           echo "Produced: $DEB"
           dpkg-deb --info "$DEB" | grep -E 'Package|Version|Architecture'
+
       - name: Verify .rpm was produced
         run: |
           RPM=$(ls -1t dist/*.rpm 2>/dev/null | head -1)
@@ -127,10 +128,32 @@ jobs:
           echo "Produced: $RPM"
           rpm -qpi "$RPM" 2>/dev/null | grep -E 'Name|Version|Architecture' || true
 
+      - name: Verify .AppImage was produced
+        run: |
+          APPIMAGE=$(ls -1t dist/*.AppImage 2>/dev/null | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "No .AppImage found in dist/" >&2
+            exit 1
+          fi
+          echo "APPIMAGE_PATH=$APPIMAGE" >> $GITHUB_ENV
+          echo "Produced: $APPIMAGE"
+          ls -lh "$APPIMAGE"
+
       - name: Extract version from .deb
         run: |
           VERSION=$(dpkg-deb --info "$DEB_PATH" | grep Version | awk '{print $2}')
           echo "FACTORY_VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Generate latest-linux.yml update metadata
+        run: |
+          node dist/cli.js release-metadata \
+            --release-mode permission-cleared \
+            --release-version "$FACTORY_VERSION" \
+            --repo-owner "${{ github.repository_owner }}" \
+            --repo-name "$(basename ${{ github.repository }})" \
+            --output-dir dist \
+            --validate
+          echo "METADATA_PATH=dist/latest-linux.yml" >> $GITHUB_ENV
 
       - name: Create or update GitHub release
         run: |
@@ -163,6 +186,7 @@ jobs:
           - Rust auto-update manager (factory-update-manager)
           - systemd --user service unit
           - polkit policy
+          - latest-linux.yml update metadata (electron-updater compatible)
 
           **Install (Debian/Ubuntu):**
           \`\`\`bash
@@ -173,17 +197,24 @@ jobs:
           **Install (Fedora/RHEL):**
           \`\`\`bash
           sudo rpm -i factory-desktop-${FACTORY_VERSION}.x86_64.rpm
+          \`\`\`
+
+          **Portable (AppImage):**
+          \`\`\`bash
+          chmod +x factory-desktop-${FACTORY_VERSION}.AppImage
+          ./factory-desktop-${FACTORY_VERSION}.AppImage
           \`\`\`"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists — updating asset, notes, and tag."
-            gh release upload "$RELEASE_TAG" "$DEB_PATH" "$RPM_PATH" --clobber
+            gh release upload "$RELEASE_TAG" \
+              "$DEB_PATH" "$RPM_PATH" "$APPIMAGE_PATH" "$METADATA_PATH" --clobber
             gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES"
           else
             gh release create "$RELEASE_TAG" \
               --title "Factory Desktop $FACTORY_VERSION (Linux)" \
               --notes "$RELEASE_NOTES" \
-              "$DEB_PATH" "$RPM_PATH"
+              "$DEB_PATH" "$RPM_PATH" "$APPIMAGE_PATH" "$METADATA_PATH"
           fi
 
           # Move the tag to the current commit via the GitHub API so
@@ -213,4 +244,12 @@ jobs:
         with:
           name: factory-desktop-${{ env.FACTORY_VERSION }}-rpm
           path: dist/*.rpm
+          if-no-files-found: warn
+
+      - name: Upload .AppImage as artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: factory-desktop-${{ env.FACTORY_VERSION }}-appimage
+          path: dist/*.AppImage
           if-no-files-found: warn

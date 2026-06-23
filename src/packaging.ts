@@ -22,10 +22,6 @@ import { checkTool } from "./tool-check";
 export enum RpmDeferralReason {
   /** rpmbuild is not installed on the host */
   NoRpmbuild = "no-rpmbuild",
-  /** Docker is not available on the host */
-  NoDocker = "no-docker",
-  /** Docker is available but no RPM build strategy has been approved */
-  DockerNotApproved = "docker-not-approved",
 }
 
 /** Result of checking whether RPM build prerequisites are satisfied */
@@ -41,14 +37,13 @@ export interface RpmPrerequisiteCheckResult {
 /**
  * Check whether RPM build prerequisites are satisfied.
  *
- * RPM requires either:
- * - `rpmbuild` installed on the host, OR
- * - A verified Docker-based RPM build pipeline that is both approved and
- *   functional (not just policy-approved but not yet implemented).
+ * RPM builds require `rpmbuild` on the host. electron-builder calls
+ * rpmbuild directly (unlike deb, which uses fpm). When rpmbuild is
+ * missing, the build is deferred with a diagnostic — the user must
+ * install `rpm` (Debian/Ubuntu) or `rpm-build` (Fedora).
  *
  * VAL-PACKAGE-010: Requesting an RPM build on a host without rpmbuild
- * or without an approved Docker build path must fail fast with a
- * deferred-status diagnostic.
+ * must fail fast with a deferred-status diagnostic.
  */
 export function checkRpmPrerequisites(): RpmPrerequisiteCheckResult {
   // electron-builder requires `rpmbuild` on the host to build RPM targets.
@@ -349,7 +344,7 @@ export function buildPackages(options: PackageBuildOptions): PackageBuildResult 
     if (rpmRequested && !rpmCheck.available) {
       errors.push(
         "RPM target requested but prerequisites are not met. " +
-        "RPM is deferred until rpmbuild or an approved Docker-based build path is available."
+        "RPM is deferred until rpmbuild is available. Install with: sudo apt install rpm (Debian/Ubuntu) or sudo dnf install rpm-build (Fedora)."
       );
     } else {
       errors.push("No valid targets specified. Supported targets: deb, appimage");
