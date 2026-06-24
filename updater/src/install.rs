@@ -102,14 +102,25 @@ pub fn pkexec_command(current_exe: &Path, package_path: &Path) -> Command {
 }
 
 fn run_install(command: &mut Command) -> Result<()> {
-    let status = command
-        .status()
+    let output = command
+        .output()
         .context("Failed to execute installation command")?;
-    anyhow::ensure!(
-        status.success(),
-        "installation command exited with {status}"
-    );
-    Ok(())
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut message = format!("installation command exited with {}", output.status);
+    if !stderr.trim().is_empty() {
+        message.push_str(": ");
+        message.push_str(stderr.trim());
+    } else if !stdout.trim().is_empty() {
+        message.push_str(": ");
+        message.push_str(stdout.trim());
+    }
+    anyhow::bail!(message);
 }
 pub(crate) struct StablePackage {
     #[allow(dead_code)]

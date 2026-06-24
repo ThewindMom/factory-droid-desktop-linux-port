@@ -25,9 +25,15 @@ UPDATER_STAGED="$APP_DIR/.factory-linux/updater"
 if [ -d "$UPDATER_STAGED" ]; then
     # Updater binary
     if [ -f "$UPDATER_STAGED/factory-update-manager" ]; then
-        cp "$UPDATER_STAGED/factory-update-manager" /usr/bin/factory-update-manager
-        chown root:root /usr/bin/factory-update-manager
-        chmod 755 /usr/bin/factory-update-manager
+        # Use atomic rename to avoid "Text file busy" when the updater
+        # binary is still running (the daemon is a --user service that
+        # may be active during the install). cp overwrites in-place and
+        # fails with ETXTBSY; mv atomically replaces the inode, letting
+        # the old process keep running with the old file mapped.
+        cp "$UPDATER_STAGED/factory-update-manager" /usr/bin/factory-update-manager.new
+        chown root:root /usr/bin/factory-update-manager.new
+        chmod 755 /usr/bin/factory-update-manager.new
+        mv -f /usr/bin/factory-update-manager.new /usr/bin/factory-update-manager
     fi
     # Systemd user service unit
     if [ -f "$UPDATER_STAGED/factory-update-manager.service" ]; then
