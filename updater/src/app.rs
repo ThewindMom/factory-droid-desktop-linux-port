@@ -675,7 +675,21 @@ async fn reconcile_pending_install(
                 return Ok(());
             }
 
-            set_status(state, paths, UpdateStatus::ReadyToInstall)?;
+            // App is NOT running (or auto_install disabled) — install now.
+            // This mirrors the WaitingForAppExit arm's pre-install checks.
+            // Without this, the daemon gets stuck at ReadyToInstall forever
+            // when the app was never started or was already closed.
+            if install_auth_retry_is_blocked(state) {
+                return Ok(());
+            }
+
+            if !graphical_polkit_auth_agent_is_likely_available() {
+                defer_install_for_manual_auth(state, paths, &package_path)?;
+                maybe_notify_manual_install_required(state, paths, config.notifications)?;
+                return Ok(());
+            }
+
+            trigger_install(config, state, paths, &config.workspace_root, &package_path).await?;
         }
         UpdateStatus::WaitingForAppExit => {
             let Some(package_path) = state.artifact_paths.package_path.clone() else {
