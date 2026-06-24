@@ -19,7 +19,7 @@
 <policyconfig>
 
   <vendor>Factory Desktop Linux</vendor>
-  <vendor_url>https://github.com/ThewindMom/factory-droid-desktop-linux-port</vendor_url>
+  <vendor_url>https://github.com/ThewindMom/factory-desktop-linux</vendor_url>
 
   <action id="org.factory.desktop.update-manager.install-deb">
     <description>Install a Factory Desktop update</description>

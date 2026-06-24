@@ -237,12 +237,12 @@ mod tests {
             "assets": [
                 {
                     "name": "factory-desktop_0.110.0_amd64.deb",
-                    "browser_download_url": "https://github.com/ThewindMom/factory-droid-desktop-linux-port/releases/download/v0.110.0/factory-desktop_0.110.0_amd64.deb",
+                    "browser_download_url": "https://github.com/ThewindMom/factory-desktop-linux/releases/download/v0.110.0/factory-desktop_0.110.0_amd64.deb",
                     "size": 131072000
                 },
                 {
                     "name": "Source code (zip)",
-                    "browser_download_url": "https://github.com/ThewindMom/factory-droid-desktop-linux-port/zipball/v0.110.0",
+                    "browser_download_url": "https://github.com/ThewindMom/factory-desktop-linux/zipball/v0.110.0",
                     "size": 0
                 }
             ]
@@ -271,11 +271,11 @@ mod tests {
         let json = r#"{
             "ref": "refs/tags/v0.110.0",
             "node_id": "ABC123",
-            "url": "https://api.github.com/repos/ThewindMom/factory-droid-desktop-linux-port/git/refs/tags/v0.110.0",
+            "url": "https://api.github.com/repos/ThewindMom/factory-desktop-linux/git/refs/tags/v0.110.0",
             "object": {
                 "sha": "13e131b6d103af0129821b7209d08bd9cc370599",
                 "type": "commit",
-                "url": "https://api.github.com/repos/ThewindMom/factory-droid-desktop-linux-port/git/commits/13e131b6d103af0129821b7209d08bd9cc370599"
+            "url": "https://api.github.com/repos/ThewindMom/factory-desktop-linux/git/commits/13e131b6d103af0129821b7209d08bd9cc370599"
             }
         }"#;
 

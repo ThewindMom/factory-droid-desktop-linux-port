@@ -34,10 +34,17 @@ pub enum Commands {
     InstallDeb {
         #[arg(long)]
         path: PathBuf,
+        /// Path to write a result sentinel file ("success\n" or "failure\n<msg>")
+        /// after the install completes. Used by the daemon to detect completion
+        /// of installs launched via systemd-run transient units.
+        #[arg(long)]
+        result_file: Option<PathBuf>,
     },
     /// Install a Debian package as an explicit rollback with elevated privileges.
     InstallRollbackDeb {
         #[arg(long)]
         path: PathBuf,
+        #[arg(long)]
+        result_file: Option<PathBuf>,
     },
 }

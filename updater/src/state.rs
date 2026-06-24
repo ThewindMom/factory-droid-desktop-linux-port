@@ -85,6 +85,11 @@ pub struct PersistedState {
     /// The port build SHA of a pending port .deb download (if any).
     #[serde(default)]
     pub port_candidate_sha: Option<String>,
+    /// Path to the result sentinel file for an in-progress install launched
+    /// via systemd-run transient unit. Set when `trigger_install` launches
+    /// the install, cleared when the daemon processes the result.
+    #[serde(default)]
+    pub install_task_result_file: Option<String>,
 }
 
 impl PersistedState {
@@ -107,6 +112,7 @@ impl PersistedState {
             rollback_blocked_candidate_version: None,
             installed_port_sha: None,
             port_candidate_sha: None,
+            install_task_result_file: None,
         }
     }
 

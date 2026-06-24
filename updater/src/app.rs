@@ -61,15 +61,43 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Status { json } => run_status(&config, &mut state, &paths, json).await,
         Commands::InstallReady => run_install_ready(&config, &mut state, &paths).await,
         Commands::Rollback => rollback::run(&config, &mut state, &paths).await,
-        Commands::InstallDeb { path } => install::install_deb(&path),
-        Commands::InstallRollbackDeb { path } => install_rollback::install_deb(&path),
+        Commands::InstallDeb { path, result_file } => {
+            write_install_result(&path, result_file.as_deref(), install::install_deb(&path))
+        }
+        Commands::InstallRollbackDeb { path, result_file } => {
+            write_install_result(&path, result_file.as_deref(), install_rollback::install_deb(&path))
+        }
     }
 }
 
 fn persist_state(paths: &RuntimePaths, state: &PersistedState) -> Result<()> {
     state.save(&paths.state_file)
 }
-
+/// Writes a result sentinel file after an install-deb/install-rollback-deb
+/// subcommand completes. The daemon polls this file to detect completion of
+/// installs launched via systemd-run transient units.
+///
+/// Format: `success\n` or `failure\n<error message>`
+fn write_install_result(
+    package_path: &Path,
+    result_file: Option<&Path>,
+    result: Result<()>,
+) -> Result<()> {
+    let _ = package_path; // used for logging context if needed
+    if let Some(result_file) = result_file {
+        let content = match &result {
+            Ok(()) => "success\n".to_string(),
+            Err(e) => format!("failure\n{e}"),
+        };
+        // Best-effort: if we can't write the sentinel, the daemon will
+        // eventually detect the failure via systemd unit status.
+        if let Some(parent) = result_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(result_file, content);
+    }
+    result
+}
 fn persist_if_changed(
     paths: &RuntimePaths,
     state: &PersistedState,
@@ -236,7 +264,7 @@ async fn run_daemon(
     paths: &RuntimePaths,
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
-    recover_interrupted_install(state, paths)?;
+    recover_interrupted_install(config, state, paths)?;
     complete_current_dmg_update_if_already_installed(config, state, paths)?;
     normalize_workspace_dir_and_persist(state, paths)?;
     maybe_prune_workspace_cache(&config.workspace_root, state);
@@ -295,7 +323,7 @@ async fn run_check_now(
     if_stale: bool,
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
-    recover_interrupted_install(state, paths)?;
+    recover_interrupted_install(config, state, paths)?;
     complete_current_dmg_update_if_already_installed(config, state, paths)?;
     normalize_workspace_dir_and_persist(state, paths)?;
     maybe_prune_workspace_cache(&config.workspace_root, state);
@@ -604,7 +632,7 @@ async fn reconcile_pending_install(
     paths: &RuntimePaths,
 ) -> Result<()> {
     sync_runtime_state(config, state);
-    recover_interrupted_install(state, paths)?;
+    recover_interrupted_install(config, state, paths)?;
     if complete_pending_install_if_already_installed(state, paths)? {
         let _ = maybe_notify_installed(state, paths, config.notifications);
         return Ok(());
@@ -701,6 +729,15 @@ async fn reconcile_pending_install(
 
             trigger_install(config, state, paths, &config.workspace_root, &package_path).await?;
         }
+        UpdateStatus::Installing => {
+            // An install was launched via systemd-run (fire-and-forget).
+            // Poll for completion via the result sentinel file or unit status.
+            if check_install_completion(config, state, paths)? {
+                // Install completed — state already updated by check_install_completion.
+                return Ok(());
+            }
+            // Install still running — nothing to do this cycle.
+        }
         _ => {}
     }
 
@@ -713,7 +750,7 @@ async fn run_install_ready(
     paths: &RuntimePaths,
 ) -> Result<()> {
     sync_and_persist(config, state, paths)?;
-    recover_interrupted_install(state, paths)?;
+    recover_interrupted_install(config, state, paths)?;
 
     if complete_current_dmg_update_if_already_installed(config, state, paths)? {
         println!("Factory Desktop is already up to date.");
@@ -973,11 +1010,18 @@ fn complete_pending_install_if_already_installed(
     Ok(true)
 }
 
-fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
+fn recover_interrupted_install(config: &RuntimeConfig, state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
     if state.status != UpdateStatus::Installing {
         return Ok(());
     }
 
+    // Refresh installed_port_sha from the on-disk build-info.json before
+    // comparing against port_candidate_sha. After a successful install, the
+    // new build-info.json on disk has the new SHA, but the persisted state
+    // still holds the old SHA from the previous daemon startup. Without this
+    // refresh, the port SHA comparison below would incorrectly see a mismatch
+    // and fall through to ReadyToInstall, re-triggering the install in a loop.
+    sync_runtime_state(config, state);
     if let Some(candidate_version) = state.candidate_version.clone().filter(|candidate| {
         installed_version_satisfies_candidate(&state.installed_version, candidate)
     }) {
@@ -1180,6 +1224,11 @@ async fn trigger_install(
     state.status = UpdateStatus::Installing;
     state.waiting_for_app_exit_auto_install = false;
     state.error_message = None;
+
+    // Set up the result sentinel path so the daemon can detect completion
+    // after a restart (the postinst restarts the daemon mid-install).
+    let result_file = paths.state_dir.join("install-result");
+    state.install_task_result_file = Some(result_file.to_string_lossy().into_owned());
     persist_state(paths, state)?;
 
     let _ = notify::send(
@@ -1187,12 +1236,98 @@ async fn trigger_install(
         "Applying the locally rebuilt Linux package.",
     );
 
+    // Remove any stale result sentinel from a previous attempt.
+    let _ = fs::remove_file(&result_file);
+
     let current_exe = std::env::current_exe().context("Failed to resolve updater binary path")?;
-    let output = install::pkexec_command(&current_exe, package_path)
+
+    // Launch the install as a transient systemd --user unit so it survives
+    // the daemon restart that the postinst triggers (systemctl --user start).
+    // The unit runs pkexec → factory-update-manager install-deb --result-file,
+    // which writes a result sentinel on completion. The daemon polls for it
+    // on subsequent reconcile cycles via `check_install_completion`.
+    //
+    // We do NOT use --collect: without it, the unit persists after exit so
+    // the daemon can check `systemctl --user show factory-install-task
+    // --property=Result` as a fallback if the sentinel was never written
+    // (e.g. pkexec auth denied, binary crash). The daemon resets the unit
+    // after processing the result.
+    let unit_name = "factory-install-task";
+    let mut command = tokio::process::Command::new("systemd-run");
+    command
+        .args([
+            "--user",
+            "--unit",
+            unit_name,
+            "--quiet",
+            "pkexec",
+            "--disable-internal-agent",
+        ])
+        .arg(&current_exe)
+        .arg("install-deb")
+        .arg("--path")
+        .arg(package_path)
+        .arg("--result-file")
+        .arg(&result_file);
+
+    match command.status().await {
+        Ok(status) if status.success() => {
+            // systemd-run launched the transient unit successfully. The actual
+            // dpkg install is now running independently in the transient unit.
+            // We'll detect completion on the next reconcile cycle via the
+            // result sentinel file or unit status.
+            info!("install launched in transient unit '{}'", unit_name);
+            Ok(())
+        }
+        Ok(status) => {
+            // systemd-run itself failed (not the install). Fall back to the
+            // old synchronous pkexec path — better than no install at all.
+            warn!(status = %status, "systemd-run failed; falling back to direct pkexec");
+            trigger_install_fallback(config, state, paths, workspace_root, package_path, &current_exe, &result_file).await
+        }
+        Err(e) => {
+            // systemd-run binary not found — fall back to direct pkexec.
+            warn!(error = %e, "systemd-run not available; falling back to direct pkexec");
+            trigger_install_fallback(config, state, paths, workspace_root, package_path, &current_exe, &result_file).await
+        }
+    }
+}
+
+/// Fallback: synchronous pkexec install (the old behavior). Used when
+/// systemd-run is unavailable. This path has the self-restart race
+/// (postinst restarts the daemon mid-install), but it's better than
+/// no install at all.
+async fn trigger_install_fallback(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    workspace_root: &Path,
+    package_path: &Path,
+    current_exe: &Path,
+    result_file: &Path,
+) -> Result<()> {
+    let mut command = install::pkexec_command(current_exe, package_path);
+    command.arg("--result-file").arg(result_file);
+    let output = command
         .output()
         .context("Failed to launch pkexec for update installation")?;
     let status = output.status;
 
+    finalize_install_result(config, state, paths, workspace_root, status, &output.stdout, &output.stderr).await
+}
+
+/// Shared completion handler: updates state based on the install exit status.
+/// Called from the fallback pkexec path (synchronous) and from
+/// `check_install_completion` (asynchronous, polling the sentinel file).
+async fn finalize_install_result(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    workspace_root: &Path,
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<()> {
     if status.success() {
         state.status = UpdateStatus::Installed;
         state.waiting_for_app_exit_auto_install = false;
@@ -1201,24 +1336,26 @@ async fn trigger_install(
         state.rollback_blocked_candidate_version = None;
         state.port_candidate_sha = None;
         state.installed_port_sha = installed_port_build_sha(config);
+        state.install_task_result_file = None;
         state.error_message = None;
         state.notified_events.clear();
         let _ = maybe_notify_installed(state, paths, true);
         maybe_prune_workspace_cache(workspace_root, state);
+        persist_state(paths, state)?;
         return Ok(());
     }
 
-    let stdout = summarize_command_output(&output.stdout);
-    let stderr = summarize_command_output(&output.stderr);
+    let stdout_summary = summarize_command_output(stdout);
+    let stderr_summary = summarize_command_output(stderr);
     error!(
         status = %status,
-        stdout = stdout.as_deref().unwrap_or(""),
-        stderr = stderr.as_deref().unwrap_or(""),
+        stdout = stdout_summary.as_deref().unwrap_or(""),
+        stderr = stderr_summary.as_deref().unwrap_or(""),
         "privileged install failed"
     );
 
     let mut message = format!("Privileged install exited with status {status}");
-    if let Some(stderr) = stderr {
+    if let Some(stderr) = stderr_summary {
         message.push_str(": ");
         message.push_str(&stderr);
     }
@@ -1235,6 +1372,118 @@ async fn trigger_install(
         "The package could not be installed. Check the updater log for details.",
     );
     Err(error)
+}
+
+/// Checks whether a previously launched install (via systemd-run transient
+/// unit) has completed. Called from `reconcile_pending_install` when status
+/// is `Installing`.
+///
+/// Detection order:
+/// 1. Result sentinel file (written by install-deb --result-file)
+/// 2. systemd unit status (fallback if sentinel missing)
+///
+/// Returns `Ok(true)` if the install completed (success or failure) and
+/// state was updated, `Ok(false)` if the install is still running.
+fn check_install_completion(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<bool> {
+    let result_file = paths.state_dir.join("install-result");
+
+    // 1. Check for the result sentinel file.
+    if result_file.exists() {
+        let content = fs::read_to_string(&result_file)
+            .with_context(|| format!("Failed to read install result file: {}", result_file.display()))?;
+
+        let (success, message) = if let Some(rest) = content.strip_prefix("success\n") {
+            (true, rest.to_string())
+        } else if let Some(rest) = content.strip_prefix("failure\n") {
+            (false, rest.to_string())
+        } else {
+            (false, content)
+        };
+
+        // Clean up the sentinel and reset the transient unit.
+        let _ = fs::remove_file(&result_file);
+        reset_install_unit();
+
+        if success {
+            state.status = UpdateStatus::Installed;
+            state.waiting_for_app_exit_auto_install = false;
+            state.installed_version = install::installed_package_version();
+            state.candidate_version = None;
+            state.rollback_blocked_candidate_version = None;
+            state.port_candidate_sha = None;
+            state.installed_port_sha = installed_port_build_sha(config);
+            state.install_task_result_file = None;
+            state.error_message = None;
+            state.notified_events.clear();
+            maybe_prune_workspace_cache(&config.workspace_root, state);
+            let _ = maybe_notify_installed(state, paths, config.notifications);
+            persist_state(paths, state)?;
+            info!("install completed successfully (detected via sentinel)");
+            Ok(true)
+        } else {
+            state.status = UpdateStatus::Failed;
+            state.waiting_for_app_exit_auto_install = false;
+            state.install_task_result_file = None;
+            state.error_message = Some(message);
+            state.notified_events.clear();
+            persist_state(paths, state)?;
+            error!(error = %state.error_message.as_deref().unwrap_or("unknown"), "install failed (detected via sentinel)");
+            let _ = notify::send(
+                "Factory update failed",
+                "The package could not be installed. Check the updater log for details.",
+            );
+            Ok(true)
+        }
+    } else {
+        // 2. Fallback: check systemd unit status. If the unit is no longer
+        // active (finished or never started) and no sentinel exists, the
+        // install failed before writing the result — treat as failure.
+        if !is_install_unit_active() {
+            // Clean up the unit if it exists in a failed/inactive state.
+            reset_install_unit();
+
+            state.status = UpdateStatus::Failed;
+            state.waiting_for_app_exit_auto_install = false;
+            state.install_task_result_file = None;
+            state.error_message = Some(
+                "Install process exited without writing a result. \
+                 This usually means pkexec authentication was denied or the \
+                 installer crashed before completion.".to_string(),
+            );
+            state.notified_events.clear();
+            persist_state(paths, state)?;
+            error!("install failed (unit not active, no sentinel)");
+            let _ = notify::send(
+                "Factory update failed",
+                "The installer did not complete. Check the updater log for details.",
+            );
+            Ok(true)
+        } else {
+            // Unit is still active — install is running.
+            Ok(false)
+        }
+    }
+}
+
+/// Returns true if the factory-install-task transient unit is currently active.
+fn is_install_unit_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "factory-install-task"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resets (stops + resets failed state) the factory-install-task unit so it
+/// can be reused for the next install. Best-effort — failures are ignored.
+fn reset_install_unit() {
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "reset-failed", "factory-install-task"])
+        .status();
 }
 
 fn pkexec_authentication_was_not_obtained(status: &std::process::ExitStatus) -> bool {
@@ -1443,7 +1692,7 @@ mod tests {
     fn test_config(root: &std::path::Path) -> RuntimeConfig {
         RuntimeConfig {
             github_owner: "ThewindMom".to_string(),
-            github_repo: "factory-droid-desktop-linux-port".to_string(),
+            github_repo: "factory-desktop-linux".to_string(),
             dmg_api_url: "https://example.com/api/desktop".to_string(),
             arch: "x64".to_string(),
             initial_check_delay_seconds: 1,
@@ -1460,7 +1709,7 @@ mod tests {
     fn upstream_check_freshness_respects_configured_interval() {
         let config = RuntimeConfig {
             github_owner: "ThewindMom".to_string(),
-            github_repo: "factory-droid-desktop-linux-port".to_string(),
+            github_repo: "factory-desktop-linux".to_string(),
             dmg_api_url: "https://example.com/api/desktop".to_string(),
             arch: "x64".to_string(),
             initial_check_delay_seconds: 1,
