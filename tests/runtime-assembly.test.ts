@@ -21,7 +21,6 @@ import {
   formatAssemblyResult,
   formatLayoutResult,
 } from "../src/runtime-assembly";
-import { classifyBinary, BinaryType } from "../src/runtime-classifier";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -302,14 +301,14 @@ describe("validateRuntimeLayout", () => {
     expect(result.hasAppAsar).toBe(false);
   });
 
-  it("fails when resources/bin/droid is missing", async () => {
+  it("does not require resources/bin/droid in the assembled app", async () => {
     const appDir = await createMockAssembledApp(tempDir, {
       includeDroid: false,
     });
     const result = validateRuntimeLayout(appDir);
 
-    expect(result.valid).toBe(false);
-    expect(result.hasDroid).toBe(false);
+    expect(result.valid).toBe(true);
+    expect(result.hasDroid).toBe(true);
   });
 
   it("includes file type info for the executable", async () => {
@@ -481,71 +480,53 @@ describe("validateDroidBinary", () => {
     rmrf(tempDir);
   });
 
-  it("reports valid for an executable ELF x86_64 binary", async () => {
-    const appDir = await createMockAssembledApp(tempDir, { droidIsElf: true });
-    const result = validateDroidBinary(appDir);
+  it("reports valid for an executable ELF x86_64 system droid", async () => {
+    const appDir = await createMockAssembledApp(tempDir, { includeDroid: false });
+    const result = validateDroidBinary(appDir, "/usr/bin/true");
 
-    const droidPath = path.join(appDir, "resources", "bin", "droid");
-    const classification = classifyBinary(droidPath);
-
-    if (classification.type === BinaryType.ELF) {
-      expect(result.valid).toBe(true);
-      expect(result.isElf).toBe(true);
-      expect(result.isExecutable).toBe(true);
-    } else {
-      // Not a real ELF in this test environment
-      expect(result.valid).toBe(false);
-      expect(result.isElf).toBe(false);
-    }
+    expect(result.valid).toBe(true);
+    expect(result.isElf).toBe(true);
+    expect(result.isExecutable).toBe(true);
   });
 
-  it("fails when droid is missing", async () => {
-    const appDir = await createMockAssembledApp(tempDir, {
-      includeDroid: false,
-    });
-    const result = validateDroidBinary(appDir);
+  it("fails when system droid is missing", async () => {
+    const appDir = await createMockAssembledApp(tempDir, { includeDroid: false });
+    const result = validateDroidBinary(appDir, "/nonexistent/droid");
 
     expect(result.valid).toBe(false);
     expect(result.exists).toBe(false);
   });
 
-  it("fails when droid is not executable", async () => {
-    const appDir = await createMockAssembledApp(tempDir, {
-      droidIsElf: false,
-    });
-    const droidPath = path.join(appDir, "resources", "bin", "droid");
-    fs.chmodSync(droidPath, 0o644); // Remove execute permission
+  it("fails when system droid is not executable", async () => {
+    const appDir = await createMockAssembledApp(tempDir, { includeDroid: false });
+    const droidPath = path.join(tempDir, "droid-not-executable");
+    fs.writeFileSync(droidPath, "#!/bin/sh\necho 0.159.1\n");
+    fs.chmodSync(droidPath, 0o644);
 
-    const result = validateDroidBinary(appDir);
+    const result = validateDroidBinary(appDir, droidPath);
 
     expect(result.valid).toBe(false);
     expect(result.isExecutable).toBe(false);
   });
 
-  it("fails when droid is not ELF", async () => {
-    const appDir = await createMockAssembledApp(tempDir, {
-      droidIsElf: false,
-    });
-    const droidPath = path.join(appDir, "resources", "bin", "droid");
+  it("fails when system droid is not ELF", async () => {
+    const appDir = await createMockAssembledApp(tempDir, { includeDroid: false });
+    const droidPath = path.join(tempDir, "droid-script");
+    fs.writeFileSync(droidPath, "#!/bin/sh\necho 0.159.1\n");
+    fs.chmodSync(droidPath, 0o755);
 
-    // Only verify if the stand-in is not actually ELF
-    const classification = classifyBinary(droidPath);
-    if (classification.type !== BinaryType.ELF) {
-      const result = validateDroidBinary(appDir);
-      expect(result.valid).toBe(false);
-      expect(result.isElf).toBe(false);
-    }
+    const result = validateDroidBinary(appDir, droidPath);
+
+    expect(result.valid).toBe(false);
+    expect(result.isElf).toBe(false);
   });
 
-  it("rejects Mach-O droid binary", async () => {
-    const appDir = await createMockAssembledApp(tempDir, {
-      includeDroid: false,
-    });
-    // The actual Mach-O rejection is tested in runtime-classifier.test.ts.
-    // Here we verify validateDroidBinary handles missing droids properly.
-    const result = validateDroidBinary(appDir);
-    expect(result.valid).toBe(false);
-    expect(result.exists).toBe(false);
+  it("does not inspect resources/bin/droid", async () => {
+    const appDir = await createMockAssembledApp(tempDir, { includeDroid: false });
+    const result = validateDroidBinary(appDir, "/usr/bin/true");
+
+    expect(result.valid).toBe(true);
+    expect(result.path).toBe("/usr/bin/true");
   });
 });
 
@@ -612,20 +593,19 @@ describe("checkResourcesPathResolution", () => {
     rmrf(tempDir);
   });
 
-  it("verifies the resources directory contains expected layout", async () => {
+  it("verifies the resources directory and system droid layout", async () => {
     const appDir = await createMockAssembledApp(tempDir);
-    const result = checkResourcesPathResolution(appDir);
+    const result = checkResourcesPathResolution(appDir, "/usr/bin/true");
 
     expect(result.resourcesDirExists).toBe(true);
     expect(result.appAsarInResources).toBe(true);
-    expect(result.binDroidInResources).toBe(true);
+    expect(result.systemDroidAvailable).toBe(true);
   });
 
   it("reports the expected resourcesPath value", async () => {
     const appDir = await createMockAssembledApp(tempDir);
-    const result = checkResourcesPathResolution(appDir);
+    const result = checkResourcesPathResolution(appDir, "/usr/bin/true");
 
-    // resourcesPath should resolve to the resources directory
     expect(result.expectedResourcesPath).toContain("resources");
   });
 
@@ -636,20 +616,20 @@ describe("checkResourcesPathResolution", () => {
       force: true,
     });
 
-    const result = checkResourcesPathResolution(appDir);
+    const result = checkResourcesPathResolution(appDir, "/usr/bin/true");
 
     expect(result.resourcesDirExists).toBe(false);
     expect(result.valid).toBe(false);
   });
 
-  it("reports missing droid in resources/bin", async () => {
+  it("does not require droid in resources/bin", async () => {
     const appDir = await createMockAssembledApp(tempDir, {
       includeDroid: false,
     });
-    const result = checkResourcesPathResolution(appDir);
+    const result = checkResourcesPathResolution(appDir, "/usr/bin/true");
 
-    expect(result.binDroidInResources).toBe(false);
-    expect(result.valid).toBe(false);
+    expect(result.systemDroidAvailable).toBe(true);
+    expect(result.valid).toBe(true);
   });
 });
 
@@ -739,9 +719,9 @@ describe("assembleLinuxRuntime", () => {
     const asarInApp = path.join(result.appDir, "resources", "app.asar");
     expect(fs.existsSync(asarInApp)).toBe(true);
 
-    // Check for resources/bin/droid
+    // System droid is resolved at runtime; it must not be bundled.
     const droidInApp = path.join(result.appDir, "resources", "bin", "droid");
-    expect(fs.existsSync(droidInApp)).toBe(true);
+    expect(fs.existsSync(droidInApp)).toBe(false);
   });
 
   it("preserves app.asar hash", async () => {
@@ -770,7 +750,7 @@ describe("assembleLinuxRuntime", () => {
     expect(asarIntactResult.intact).toBe(true);
   });
 
-  it("sets executable permissions on droid binary", async () => {
+  it("does not copy droid into resources/bin", async () => {
     const mockDist = createMockElectronDist(tempDir);
     const asarPath = await createMockAsar(tempDir);
     const droidPath = createMockDroid(tempDir);
@@ -792,9 +772,7 @@ describe("assembleLinuxRuntime", () => {
     expect(result.success).toBe(true);
 
     const droidInApp = path.join(result.appDir, "resources", "bin", "droid");
-    expect(fs.existsSync(droidInApp)).toBe(true);
-    // Verify execute permission
-    fs.accessSync(droidInApp, fs.constants.X_OK);
+    expect(fs.existsSync(droidInApp)).toBe(false);
   });
 
   it("removes default_app.asar from resources", async () => {

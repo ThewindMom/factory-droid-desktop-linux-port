@@ -35,6 +35,13 @@ const TRANSPORT_0_110_0 =
   'async function $$e(){const e=Zt.DesktopDaemonIpc;try{return(await dF())[e.statsigName]??e.defaultValue?Ms.Ipc:Ms.WebSocket}catch(t){return G("[daemon] Failed to resolve desktop daemon IPC feature flag",{cause:t}),e.defaultValue?Ms.Ipc:Ms.WebSocket}}';
 
 /**
+ * Factory Desktop 0.116.1 transport resolver (minified).
+ * Enum includes "$", which older regexes missed.
+ */
+const TRANSPORT_0_116_1 =
+  'async function mMe(){const e=an.DesktopDaemonIpc;try{return(await CF())[e.statsigName]??e.defaultValue?$s.Ipc:$s.WebSocket}catch(t){return H("[daemon] Failed to resolve desktop daemon IPC feature flag",{cause:t}),e.defaultValue?$s.Ipc:$s.WebSocket}}';
+
+/**
  * Factory Desktop 0.106.0 --listen ipc push (minified).
  * Enum: nc
  */
@@ -52,37 +59,49 @@ describe("daemon-transport-patch version-agnostic matching", () => {
   describe("transport resolver pattern", () => {
     it("matches Factory 0.106.0 minified form", () => {
       const pattern =
-        /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
+        /(async function [\w$]+\(\)\{)(const [\w$]+=[\w$]+\.DesktopDaemonIpc;[\s\S]*?\?[\w$]+\.Ipc:[\w$]+\.WebSocket\})/;
       expect(TRANSPORT_0_106_0).toMatch(pattern);
     });
 
     it("matches Factory 0.110.0 minified form", () => {
       const pattern =
-        /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
+        /(async function [\w$]+\(\)\{)(const [\w$]+=[\w$]+\.DesktopDaemonIpc;[\s\S]*?\?[\w$]+\.Ipc:[\w$]+\.WebSocket\})/;
       expect(TRANSPORT_0_110_0).toMatch(pattern);
     });
 
+    it("matches Factory 0.116.1 minified form with dollar enum alias", () => {
+      const pattern =
+        /(async function [\w$]+\(\)\{)(const [\w$]+=[\w$]+\.DesktopDaemonIpc;[\s\S]*?\?[\w$]+\.Ipc:[\w$]+\.WebSocket\})/;
+      expect(TRANSPORT_0_116_1).toMatch(pattern);
+    });
+
     it("extracts WebSocket enum reference from 0.106.0", () => {
-      const pattern = /(\w+\.WebSocket)/;
+      const pattern = /([\w$]+\.WebSocket)/;
       const match = TRANSPORT_0_106_0.match(pattern);
       expect(match?.[1]).toBe("nc.WebSocket");
     });
 
     it("extracts WebSocket enum reference from 0.110.0", () => {
-      const pattern = /(\w+\.WebSocket)/;
+      const pattern = /([\w$]+\.WebSocket)/;
       const match = TRANSPORT_0_110_0.match(pattern);
       expect(match?.[1]).toBe("Ms.WebSocket");
+    });
+
+    it("extracts WebSocket enum reference from 0.116.1", () => {
+      const pattern = /([\w$]+\.WebSocket)/;
+      const match = TRANSPORT_0_116_1.match(pattern);
+      expect(match?.[1]).toBe("$s.WebSocket");
     });
   });
 
   describe("--listen ipc push pattern", () => {
     it("matches Factory 0.106.0 form", () => {
-      const pattern = /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+      const pattern = /([\w$]+\.Ipc)&&([\w$]+\.push\("--listen","ipc"\))/;
       expect(LISTEN_IPC_0_106_0).toMatch(pattern);
     });
 
     it("matches Factory 0.110.0 form", () => {
-      const pattern = /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+      const pattern = /([\w$]+\.Ipc)&&([\w$]+\.push\("--listen","ipc"\))/;
       expect(LISTEN_IPC_0_110_0).toMatch(pattern);
     });
   });
@@ -103,12 +122,72 @@ describe("patchDaemonTransport", () => {
     );
   });
 
-  // Integration test with actual built asar (skipped if not available)
+  it("patches packaged Linux to resolve the system droid CLI", async () => {
+    /* eslint-disable @typescript-eslint/no-var-requires */
+    const asar = require("@electron/asar");
+    const path = require("path");
+    /* eslint-enable @typescript-eslint/no-var-requires */
+    const fsSync = fs;
+    const tmpDir = path.join(
+      process.cwd(),
+      "tests",
+      ".tmp-daemon-system-droid-" + Date.now(),
+    );
+    const buildDir = path.join(tmpDir, ".vite", "build");
+    fsSync.mkdirSync(buildDir, { recursive: true });
+    const bundleContent =
+      TRANSPORT_0_106_0 +
+      'function hKe({port:e,transportMode:t}){let r,o,s=[];if(q.app.isPackaged)r=Ne.join(process.resourcesPath,"bin",process.platform==="win32"?"droid.exe":"droid");const i=r;const a=[...s,"daemon","--enable-child-ipc","--droid-path",i];if(t===nc.Ipc&&a.push("--listen","ipc"))return a}';
+    fsSync.writeFileSync(path.join(buildDir, "index-SystemDroid.js"), bundleContent);
+    const asarPath = path.join(tmpDir, "app.asar");
+    await asar.createPackage(tmpDir, asarPath);
+
+    try {
+      const patchResult = await patchDaemonTransport({ asarPath });
+      expect(patchResult.success).toBe(true);
+      expect(patchResult.patched).toBe(true);
+      expect(patchResult.patches.map((p) => p.id)).toContain("use-system-droid-cli");
+
+      const validation = validateDaemonTransport({ asarPath });
+      expect(validation.valid).toBe(true);
+      expect(validation.hasSystemDroidPathPatch).toBe(true);
+      const patchedContent = asar
+        .extractFile(asarPath, ".vite/build/index-SystemDroid.js")
+        .toString("utf-8");
+      expect(patchedContent).toContain("/* linux-system-droid-cli-patch */");
+      expect(patchedContent).toContain("FACTORY_DROID_PATH");
+      expect(patchedContent).toContain('process.platform==="linux"');
+      expect(patchedContent).toContain('"command -v droid"');
+    } finally {
+      fsSync.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Integration test with actual built asar. Opt-in only: the local build dir
+  // may be stale and should not make the normal Jest suite environment-dependent.
   const builtAsarPath =
     "/home/thewind/Projects/00_Random_Coding/factory-droid-desktop-linux-port/build/factory-desktop-linux-unpacked/resources/app.asar";
-  const droidPath =
-    "/home/thewind/Projects/00_Random_Coding/factory-droid-desktop-linux-port/build/factory-desktop-linux-unpacked/resources/bin/droid";
-  const hasBuiltAsar = fs.existsSync(builtAsarPath);
+  const systemDroidPath = "/home/thewind/.local/bin/droid";
+  const hasBuiltAsar =
+    process.env.FACTORY_TEST_BUILT_ASAR === "1" &&
+    fs.existsSync(builtAsarPath) &&
+    (() => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const asar = require("@electron/asar");
+        return asar
+          .listPackage(builtAsarPath)
+          .some((file: string) =>
+            file.endsWith(".js") &&
+            asar
+              .extractFile(builtAsarPath, file.slice(1))
+              .toString("utf-8")
+              .includes("/* linux-system-droid-cli-patch */"),
+          );
+      } catch {
+        return false;
+      }
+    })();
 
   const describeIfBuilt = hasBuiltAsar ? describe : describe.skip;
 
@@ -116,21 +195,22 @@ describe("patchDaemonTransport", () => {
     it("validates daemon transport in the built asar", () => {
       const result = validateDaemonTransport({
         asarPath: builtAsarPath,
-        droidPath: fs.existsSync(droidPath) ? droidPath : undefined,
+        droidPath: fs.existsSync(systemDroidPath) ? systemDroidPath : undefined,
       });
 
       // The built asar should be patched (assembly applies the patch)
       expect(result.valid).toBe(true);
       expect(result.forcesWebSocketOnLinux).toBe(true);
       expect(result.hasListenIpcGuard).toBe(true);
+      expect(result.hasSystemDroidPathPatch).toBe(true);
     });
 
     it("droid daemon supports --listen flag (latest droid)", () => {
-      if (!fs.existsSync(droidPath)) return;
+      if (!fs.existsSync(systemDroidPath)) return;
 
       const result = validateDaemonTransport({
         asarPath: builtAsarPath,
-        droidPath: droidPath,
+        droidPath: systemDroidPath,
       });
 
       // The latest droid CLI supports --listen with choices websocket/ipc.
@@ -236,6 +316,7 @@ describe("formatDaemonTransportValidationResult", () => {
       valid: true,
       forcesWebSocketOnLinux: true,
       hasListenIpcGuard: true,
+      hasSystemDroidPathPatch: true,
       listenFlagSupported: false,
       errors: [],
       warnings: [],
@@ -243,6 +324,7 @@ describe("formatDaemonTransportValidationResult", () => {
 
     expect(result).toContain("validation passed");
     expect(result).toContain("Yes");
+    expect(result).toContain("System droid CLI resolver");
   });
 
   it("formats failing result", () => {
@@ -251,6 +333,7 @@ describe("formatDaemonTransportValidationResult", () => {
       forcesWebSocketOnLinux: false,
       hasListenIpcGuard: false,
       listenFlagSupported: false,
+      hasSystemDroidPathPatch: false,
       errors: ["IPC transport can still be selected"],
       warnings: [],
     });
@@ -265,6 +348,7 @@ describe("formatDaemonTransportValidationResult", () => {
       forcesWebSocketOnLinux: true,
       hasListenIpcGuard: true,
       listenFlagSupported: false,
+      hasSystemDroidPathPatch: true,
       supportedDaemonFlags: ["--host", "--port", "--unix"],
       errors: [],
       warnings: [],

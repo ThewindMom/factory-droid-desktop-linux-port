@@ -196,9 +196,9 @@ export interface DebValidationResult {
   packageMaintainer?: string;
   /** Whether resources/app.asar exists */
   hasAppAsar: boolean;
-  /** Whether resources/bin/droid exists */
+  /** Whether resources/bin/droid was bundled (expected false for system droid mode) */
   hasDroid: boolean;
-  /** Whether droid is executable */
+  /** Whether a bundled droid, if present, is executable */
   droidIsExecutable: boolean;
   /** Whether desktop integration files are present */
   hasDesktopIntegration: boolean;
@@ -214,9 +214,9 @@ export interface AppImageValidationResult {
   fileType?: string;
   /** Whether resources/app.asar exists */
   hasAppAsar: boolean;
-  /** Whether resources/bin/droid exists */
+  /** Whether resources/bin/droid was bundled (expected false for system droid mode) */
   hasDroid: boolean;
-  /** Whether droid is executable */
+  /** Whether a bundled droid, if present, is executable */
   droidIsExecutable: boolean;
   /** Whether desktop entry is present and has protocol metadata */
   hasDesktopEntry: boolean;
@@ -718,8 +718,8 @@ function findArtifacts(
  *
  * VAL-PACKAGE-002: Inspecting the generated .deb with dpkg-deb --info and
  * dpkg-deb --contents must show expected package metadata for Factory,
- * Linux desktop integration files, resources/app.asar, and an executable
- * resources/bin/droid.
+ * Linux desktop integration files, and resources/app.asar. The package must
+ * not require a bundled resources/bin/droid.
  */
 export function validateDebPackage(debPath: string): DebValidationResult {
   const errors: string[] = [];
@@ -808,10 +808,10 @@ export function validateDebPackage(debPath: string): DebValidationResult {
         hasAppAsar = true;
       }
 
-      // Check for droid binary
+      // Bundled droid is intentionally absent in system-droid mode. Track it
+      // only to catch accidental reintroduction.
       if (filePath.includes("resources/bin/droid")) {
         hasDroid = true;
-        // Check if executable
         if (perms.includes("x")) {
           droidIsExecutable = true;
         }
@@ -831,11 +831,8 @@ export function validateDebPackage(debPath: string): DebValidationResult {
     if (!hasAppAsar) {
       errors.push("resources/app.asar not found in .deb package contents.");
     }
-    if (!hasDroid) {
-      errors.push("resources/bin/droid not found in .deb package contents.");
-    }
     if (hasDroid && !droidIsExecutable) {
-      errors.push("resources/bin/droid is not executable in .deb package.");
+      errors.push("Bundled resources/bin/droid is present but not executable.");
     }
   } catch (err) {
     errors.push(`Failed to read .deb contents: ${String(err)}`);
@@ -864,8 +861,9 @@ export function validateDebPackage(debPath: string): DebValidationResult {
  * VAL-PACKAGE-003: Inspecting the artifact with `file` must identify it as
  * an AppImage or Linux executable AppImage payload.
  * VAL-PACKAGE-004: Extracting or inspecting the generated AppImage must show
- * resources/app.asar, resources/bin/droid, Linux icon assets, and a .desktop
- * entry with factory-desktop:// protocol metadata.
+ * resources/app.asar, Linux icon assets, and a .desktop entry with
+ * factory-desktop:// protocol metadata. A bundled resources/bin/droid is not
+ * required in system-droid mode.
  */
 export function validateAppImage(appImagePath: string): AppImageValidationResult {
   const errors: string[] = [];
@@ -1024,11 +1022,8 @@ export function validateAppImage(appImagePath: string): AppImageValidationResult
     if (!hasAppAsar) {
       errors.push("resources/app.asar not found in AppImage contents.");
     }
-    if (!hasDroid) {
-      errors.push("resources/bin/droid not found in AppImage contents.");
-    }
     if (hasDroid && !droidIsExecutable) {
-      errors.push("resources/bin/droid is not executable in AppImage.");
+      errors.push("Bundled resources/bin/droid is present but not executable.");
     }
     if (!hasDesktopEntry) {
       errors.push(".desktop entry not found in AppImage contents.");
@@ -1075,12 +1070,11 @@ export function validateAppImage(appImagePath: string): AppImageValidationResult
 // ─── Packaged Droid Binary Validation ───────────────────────────────────────
 
 /**
- * Validate the droid binary in a packaged artifact.
+ * Validate an explicitly supplied droid binary from a packaged artifact.
  *
- * VAL-PACKAGE-005: For both Debian and AppImage outputs, the packaged
- * resources/bin/droid must be inspectable as a Linux x86_64 ELF binary
- * and must run droid --version successfully from the extracted package
- * context.
+ * Kept for legacy package-inspection paths and accidental bundled-binary
+ * diagnostics; normal packages use the system-installed droid CLI and do not
+ * include resources/bin/droid.
  */
 export function validatePackagedDroid(
   droidPath: string,
@@ -1557,8 +1551,8 @@ export function formatDebValidationResult(result: DebValidationResult): string {
   if (result.packageDescription) lines.push(`Description: ${result.packageDescription}`);
 
   lines.push(`resources/app.asar: ${result.hasAppAsar ? "✓" : "✗"}`);
-  lines.push(`resources/bin/droid: ${result.hasDroid ? "✓" : "✗"}`);
-  lines.push(`droid executable: ${result.droidIsExecutable ? "✓" : "✗"}`);
+  lines.push(`bundled resources/bin/droid absent: ${!result.hasDroid ? "✓" : "✗"}`);
+  lines.push(`bundled droid executable: ${result.droidIsExecutable ? "✓" : "n/a"}`);
   lines.push(`Desktop integration: ${result.hasDesktopIntegration ? "✓" : "✗"}`);
 
   if (result.errors.length > 0) {
@@ -1582,8 +1576,8 @@ export function formatAppImageValidationResult(result: AppImageValidationResult)
 
   if (result.fileType) lines.push(`File type: ${result.fileType}`);
   lines.push(`resources/app.asar: ${result.hasAppAsar ? "✓" : "✗"}`);
-  lines.push(`resources/bin/droid: ${result.hasDroid ? "✓" : "✗"}`);
-  lines.push(`droid executable: ${result.droidIsExecutable ? "✓" : "✗"}`);
+  lines.push(`bundled resources/bin/droid absent: ${!result.hasDroid ? "✓" : "✗"}`);
+  lines.push(`bundled droid executable: ${result.droidIsExecutable ? "✓" : "n/a"}`);
   lines.push(`Desktop entry: ${result.hasDesktopEntry ? "✓" : "✗"}`);
   lines.push(`Protocol metadata: ${result.hasProtocolMetadata ? "✓" : "✗"}`);
   lines.push(`Icon assets: ${result.hasIcons ? "✓" : "✗"}`);

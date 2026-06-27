@@ -88,6 +88,48 @@ async function resolveDmgInput(
   return fetchResult.dmgPath;
 }
 
+function resolveSystemDroidCli(): { path: string; version: string | null } {
+  const candidates: string[] = [];
+  if (process.env.FACTORY_DROID_PATH) candidates.push(process.env.FACTORY_DROID_PATH);
+  try {
+    const resolved = execSync("command -v droid", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (resolved) candidates.push(resolved);
+  } catch {
+    // Fall through to common GUI-launch locations.
+  }
+
+  candidates.push(
+    path.join(os.homedir(), ".local", "bin", "droid"),
+    "/usr/local/bin/droid",
+    "/usr/bin/droid",
+  );
+
+  const droidPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!droidPath) {
+    throw new Error(
+      "System droid CLI not found. Install droid so `command -v droid` works " +
+        "or place it at ~/.local/bin/droid, /usr/local/bin/droid, or /usr/bin/droid."
+    );
+  }
+
+  let version: string | null = null;
+  try {
+    version = execSync(`"${droidPath}" --version`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 15000,
+    }).trim();
+  } catch {
+    version = null;
+  }
+
+  return { path: droidPath, version };
+}
+
 program
   .name("factory-linux-builder")
   .description(
@@ -2849,29 +2891,19 @@ program
         }
       }
 
-      // ─── Step 3: Resolve Linux Droid ────────────────────────────
-      process.stdout.write(`\n─── Step 3/6: Resolving Linux droid binary ────────────────\n`);
+      // ─── Step 3: Resolve System Droid ────────────────────────────
+      process.stdout.write(`\n─── Step 3/6: Resolving system droid CLI ────────────────\n`);
 
-      const droidOutputDir = path.join(dirs.work, "droid");
-      let versionPolicy: VersionPolicy;
-      if (options.versionPolicy === "exact") {
-        versionPolicy = VersionPolicy.Exact;
-      } else {
-        versionPolicy = VersionPolicy.FallbackToLatest;
-      }
-
-      const droidResult = await resolveDroid(selectedVersion, droidOutputDir, {
-        versionPolicy,
-      });
-
-      if (!droidResult.success) {
-        process.stderr.write(`Droid resolution failed: ${droidResult.errors.join("; ")}\n`);
+      let systemDroid: { path: string; version: string | null };
+      try {
+        systemDroid = resolveSystemDroidCli();
+      } catch (err) {
+        process.stderr.write(`${String(err)}\n`);
         process.exit(1);
       }
 
-      const droidPath = droidResult.droidPath!;
-      process.stdout.write(`✓ Linux droid resolved: ${droidPath}\n`);
-      process.stdout.write(`  Droid version: ${droidResult.droidVersion || "unknown"}\n`);
+      process.stdout.write(`✓ System droid resolved: ${systemDroid.path}\n`);
+      process.stdout.write(`  Droid version: ${systemDroid.version || "unknown"}\n`);
 
       // ─── Step 4: Assemble Linux Electron Runtime ────────────────
       process.stdout.write(`\n─── Step 4/6: Assembling Linux Electron runtime ────────────\n`);
@@ -2886,7 +2918,7 @@ program
       const assembleResult = await assembleLinuxRuntime({
         asarPath,
         asarHash,
-        droidPath,
+        droidPath: systemDroid.path,
         outputDir: dirs.build,
         electronVersion: options.electronVersion,
         appName: options.execName,
@@ -2917,7 +2949,7 @@ program
               path: options.dmg,
             },
             factoryVersion: selectedVersion,
-            droidVersion: droidResult.droidVersion ?? null,
+            systemDroidVersion: systemDroid.version ?? null,
             electronVersion: options.electronVersion,
             buildTimestamp: new Date().toISOString(),
             portBuildSha: process.env.GITHUB_SHA ?? null,
@@ -3207,7 +3239,7 @@ program
         `╚══════════════════════════════════════════════════════════════╝\n\n` +
         `  Factory version: ${selectedVersion}\n` +
         `  App directory:   ${appDir}\n` +
-        `  Droid binary:    ${droidPath}\n` +
+        `  System droid:   ${systemDroid.path}\n` +
         `  Desktop entry:   ${desktopResult.desktopFilePath}\n` +
         `  Artifacts:\n`
       );

@@ -5,7 +5,7 @@
  * non-darwin platforms (the menu builder gates it behind
  * `process.platform !== "darwin"`). The existing dialog shows only
  * `app.getVersion()` + Electron/Chromium/Node versions — it does NOT surface
- * the bundled droid CLI version, the port build SHA, or the update status
+ * the system droid CLI version, the port build SHA, or the update status
  * from the factory-update-manager daemon.
  *
  * This patch replaces the dialog's `detail:` template literal with a runtime
@@ -85,7 +85,7 @@ const CHIP_FACTORY_LABEL = 'const parts=["Factory Desktop "+v];';
 const OLD_CHIP_DROID_LABEL =
   'if(b.droidVersion)parts.push("Droid "+b.droidVersion);';
 const CHIP_DROID_LABEL =
-  'if(b.droidVersion)parts.push("Bundled Droid CLI "+b.droidVersion);';
+  'if(typeof sdv!=="undefined"&&sdv)parts.push("System Droid CLI "+sdv);else parts.push("System Droid CLI not found");';
 const OLD_CHIP_TEXT_JOIN = 'const text=parts.join(" · ");';
 const CHIP_TEXT_JOIN = 'const text=parts.join("\\n");';
 
@@ -137,19 +137,20 @@ function buildInjectedDetail(appGetVersionRef: string): string {
     // Resolve app root: process.execPath's parent (the app dir) contains
     // .factory-linux/build-info.json. In a packaged app, process.resourcesPath
     // is <app>/resources; the app root is its parent.
-    `const p=require("path"),f=require("fs");` +
+    `const p=require("path"),f=require("fs"),cp=require("child_process"),os=require("os");` +
     `let r=p.dirname(process.execPath);` +
     `if(f.existsSync(p.join(r,".factory-linux","build-info.json"))===false)` +
     `r=p.dirname(p.dirname(process.execPath));` +
     // Read build-info.json
     `let b={};try{b=JSON.parse(f.readFileSync(p.join(r,".factory-linux","build-info.json"),"utf-8"))}catch(e){}` +
+    `let sdv=b.systemDroidVersion||"";try{const c=[p.join(os.homedir(),".local","bin","droid"),"/usr/local/bin/droid","/usr/bin/droid"];let dp="";if(process.env.FACTORY_DROID_PATH&&f.existsSync(process.env.FACTORY_DROID_PATH))dp=process.env.FACTORY_DROID_PATH;try{if(!dp)dp=cp.execFileSync("sh",["-lc","command -v droid"],{encoding:"utf-8",timeout:2000}).trim()}catch(e){}if(!dp){for(const x of c)if(f.existsSync(x)){dp=x;break}}if(dp)sdv=cp.execFileSync(dp,["--version"],{encoding:"utf-8",timeout:2500}).trim()}catch(e){}` +
     // Read state.json (updater daemon state)
-    `let s={};const sd=process.env.XDG_STATE_HOME||p.join(require("os").homedir(),".local","state");` +
+    `let s={};const sd=process.env.XDG_STATE_HOME||p.join(os.homedir(),".local","state");` +
     `try{s=JSON.parse(f.readFileSync(p.join(sd,"factory-update-manager","state.json"),"utf-8"))}catch(e){}` +
     // Build version detail
     `const v=${appGetVersionRef};` +
     `let d="Version: "+v;` +
-    `if(b.droidVersion)d+="\\nBundled Droid CLI: "+b.droidVersion;` +
+    `d+="\\nSystem Droid CLI: "+(sdv||"not found");` +
     `if(b.portBuildSha)d+="\\nPort build: "+b.portBuildSha.slice(0,7);` +
     `d+="\\nElectron: "+process.versions.electron+"\\nChromium: "+process.versions.chrome+"\\nNode.js: "+process.versions.node;` +
     // Append update status from the daemon (state.json).
@@ -183,12 +184,13 @@ function buildInjectedVisibleVersionChip(
     `if(f.existsSync(p.join(r,".factory-linux","build-info.json"))===false)` +
     `r=p.dirname(p.dirname(process.execPath));` +
     `let b={};try{b=JSON.parse(f.readFileSync(p.join(r,".factory-linux","build-info.json"),"utf-8"))}catch(e){}` +
-    `let remoteDaemonVersion="",remoteDaemonStale=false;try{if(process.platform==="linux"&&b.droidVersion&&f.existsSync("/proc")){for(const pid of f.readdirSync("/proc")){if(!/^\\d+$/.test(pid))continue;let cmd="";try{cmd=f.readFileSync("/proc/"+pid+"/cmdline","utf-8").replace(/\\0/g," ")}catch(e){}if(!cmd.includes("daemon")||!cmd.includes("--remote-access")||!cmd.includes("droid"))continue;try{const rv=cp.execFileSync("/proc/"+pid+"/exe",["--version"],{encoding:"utf-8",timeout:2500}).trim();if(rv&&rv!==b.droidVersion){remoteDaemonVersion=rv;remoteDaemonStale=true;break}}catch(e){}}}}catch(e){}` +
+    `let sdv=b.systemDroidVersion||"";try{const c=[p.join(os.homedir(),".local","bin","droid"),"/usr/local/bin/droid","/usr/bin/droid"];let dp="";if(process.env.FACTORY_DROID_PATH&&f.existsSync(process.env.FACTORY_DROID_PATH))dp=process.env.FACTORY_DROID_PATH;try{if(!dp)dp=cp.execFileSync("sh",["-lc","command -v droid"],{encoding:"utf-8",timeout:2000}).trim()}catch(e){}if(!dp){for(const x of c)if(f.existsSync(x)){dp=x;break}}if(dp)sdv=cp.execFileSync(dp,["--version"],{encoding:"utf-8",timeout:2500}).trim()}catch(e){}` +
+    `let remoteDaemonVersion="",remoteDaemonStale=false;try{if(process.platform==="linux"&&sdv&&f.existsSync("/proc")){for(const pid of f.readdirSync("/proc")){if(!/^\\d+$/.test(pid))continue;let cmd="";try{cmd=f.readFileSync("/proc/"+pid+"/cmdline","utf-8").replace(/\\0/g," ")}catch(e){}if(!cmd.includes("daemon")||!cmd.includes("--remote-access")||!cmd.includes("droid"))continue;try{const rv=cp.execFileSync("/proc/"+pid+"/exe",["--version"],{encoding:"utf-8",timeout:2500}).trim();if(rv&&rv!==sdv){remoteDaemonVersion=rv;remoteDaemonStale=true;break}}catch(e){}}}}catch(e){}` +
     `let s={};const sd=process.env.XDG_STATE_HOME||p.join(os.homedir(),".local","state");` +
     `try{s=JSON.parse(f.readFileSync(p.join(sd,"factory-update-manager","state.json"),"utf-8"))}catch(e){}` +
     `const v=b.factoryVersion||${appGetVersionRef};` +
     `const parts=["Factory Desktop "+v];` +
-    `if(b.droidVersion)parts.push("Bundled Droid CLI "+b.droidVersion);` +
+    `if(sdv)parts.push("System Droid CLI "+sdv);else parts.push("System Droid CLI not found");` +
     `const up=["update_detected","downloading_dmg","preparing_workspace","building_package","ready_to_install","waiting_for_app_exit","installing"],cv=s.candidate_version;` +
     `const desktopUpdate=!!(cv&&cv!==v),ready=s.status==="ready_to_install"||s.status==="waiting_for_app_exit";` +
     `let command="";` +

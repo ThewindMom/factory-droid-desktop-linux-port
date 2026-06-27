@@ -1,7 +1,7 @@
 /**
  * Linux Electron runtime assembly: assembles a Linux Electron app directory
- * from extracted app.asar and resolved Linux droid, preserving
- * resources/app.asar and resources/bin/droid layout.
+ * from extracted app.asar, preserving resources/app.asar while resolving
+ * the droid CLI from the user's system at runtime.
  *
  * Fulfills: VAL-RUNTIME-001, VAL-RUNTIME-002, VAL-RUNTIME-003,
  *           VAL-RUNTIME-010, VAL-RUNTIME-011, VAL-RUNTIME-016
@@ -24,8 +24,8 @@ export interface RuntimeAssemblyOptions {
   asarPath: string;
   /** Expected SHA-256 hash of the app.asar file */
   asarHash: string;
-  /** Path to the resolved Linux droid ELF binary */
-  droidPath: string;
+  /** Optional system droid path to validate during assembly */
+  droidPath?: string;
   /** Output directory for the assembled app */
   outputDir: string;
   /** Electron version to use (default: "39.2.7") */
@@ -91,7 +91,7 @@ export interface LayoutValidationResult {
   hasResourcesDir: boolean;
   /** Whether resources/app.asar exists */
   hasAppAsar: boolean;
-  /** Whether resources/bin/droid exists */
+  /** Whether a system droid CLI is available */
   hasDroid: boolean;
   /** File type output for the main executable */
   executableFileType?: string;
@@ -119,13 +119,13 @@ export interface AsarIntactResult {
   errors: string[];
 }
 
-/** Droid binary validation result (VAL-RUNTIME-003) */
+/** System droid CLI validation result (VAL-RUNTIME-003) */
 export interface DroidBinaryResult {
-  /** Whether the droid binary is valid */
+  /** Whether the system droid CLI is valid */
   valid: boolean;
-  /** Whether the droid file exists */
+  /** Whether the droid executable exists */
   exists: boolean;
-  /** Path to the droid binary */
+  /** Resolved path to the droid executable */
   path: string;
   /** Whether the droid is Linux ELF */
   isElf: boolean;
@@ -165,12 +165,12 @@ export interface ResourcesPathResult {
   resourcesDirExists: boolean;
   /** Whether app.asar is in resources */
   appAsarInResources: boolean;
-  /** Whether bin/droid is in resources */
-  binDroidInResources: boolean;
+  /** Whether system droid CLI is available */
+  systemDroidAvailable: boolean;
   /** Expected resourcesPath value */
   expectedResourcesPath: string;
-  /** Expected droid path from resourcesPath */
-  expectedDroidPath: string;
+  /** Resolved system droid path */
+  systemDroidPath: string;
   /** Errors */
   errors: string[];
 }
@@ -276,21 +276,54 @@ function computeFileHash(filePath: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+function resolveSystemDroidPath(explicitPath?: string): string {
+  if (explicitPath) return explicitPath;
+  if (process.env.FACTORY_DROID_PATH && fs.existsSync(process.env.FACTORY_DROID_PATH)) {
+    return process.env.FACTORY_DROID_PATH;
+  }
+
+  try {
+    const resolved = execSync("command -v droid", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (resolved) return resolved;
+  } catch {
+    // Fall through to GUI-launch/common install locations.
+  }
+
+  const candidates = [
+    path.join(osHomedir(), ".local", "bin", "droid"),
+    "/usr/local/bin/droid",
+    "/usr/bin/droid",
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return "";
+}
+
+function osHomedir(): string {
+  return process.env.HOME || process.env.USERPROFILE || "";
+}
+
 /**
- * Assemble a Linux Electron app directory from extracted app.asar
- * and resolved Linux droid.
+ * Assemble a Linux Electron app directory from extracted app.asar.
  *
  * This is the main assembly function that:
  * 1. Copies the Electron Linux runtime into the output directory
  * 2. Renames the main executable to the app name
  * 3. Places app.asar in resources/
- * 4. Places the Linux droid ELF in resources/bin/
+ * 4. Patches Factory to resolve the system droid CLI at runtime
  * 5. Removes default_app.asar
- * 6. Validates the assembled layout
+ * 6. Validates the assembled layout and system droid availability
  *
  * VAL-RUNTIME-001: Produces Linux Electron layout, not macOS
  * VAL-RUNTIME-002: Preserves app.asar integrity
- * VAL-RUNTIME-003: Ensures droid is executable Linux ELF
+ * VAL-RUNTIME-003: Ensures system droid CLI is executable Linux ELF
  * VAL-RUNTIME-016: Validates shared library dependencies
  */
 export async function assembleLinuxRuntime(
@@ -307,8 +340,12 @@ export async function assembleLinuxRuntime(
     errors.push(`app.asar not found: ${options.asarPath}`);
   }
 
-  if (!fs.existsSync(options.droidPath)) {
-    errors.push(`Droid binary not found: ${options.droidPath}`);
+  const systemDroidPath = resolveSystemDroidPath(options.droidPath);
+  if (!systemDroidPath) {
+    errors.push(
+      "System droid CLI not found. Install droid so `command -v droid` works " +
+        "or place it at ~/.local/bin/droid, /usr/local/bin/droid, or /usr/bin/droid."
+    );
   }
 
   if (!fs.existsSync(electronDistDir)) {
@@ -429,19 +466,9 @@ export async function assembleLinuxRuntime(
     );
   }
 
-  // Step 5: Copy droid binary to resources/bin/
-  const binDir = path.join(resourcesDir, "bin");
-  fs.mkdirSync(binDir, { recursive: true });
-
-  const destDroidPath = path.join(binDir, "droid");
-  fs.copyFileSync(options.droidPath, destDroidPath);
-
-  // Set executable permissions on droid
-  try {
-    fs.chmodSync(destDroidPath, 0o755);
-  } catch {
-    warnings.push("Failed to set executable permissions on droid binary.");
-  }
+  // Step 5: Do not copy droid into resources/bin/. The Linux app is patched to
+  // resolve the user's system droid CLI at runtime so the settings page and
+  // daemon agree on the same installed CLI version.
 
   // Also ensure the main app executable is executable
   if (fs.existsSync(newExe)) {
@@ -459,7 +486,7 @@ export async function assembleLinuxRuntime(
       ? [daemonTransportPatchResult.patchedHash]
       : [],
   });
-  const droidResult = validateDroidBinary(appDir);
+  const droidResult = validateDroidBinary(appDir, systemDroidPath);
   const sharedLibResult = validateSharedLibraries(appDir, { appName: options.appName });
 
   // Collect validation errors
@@ -516,9 +543,8 @@ export async function assembleLinuxRuntime(
  *
  * VAL-RUNTIME-001: A successful runtime assembly must produce a Linux
  * Electron app directory with an executable app binary, Electron runtime
- * files, resources/app.asar, and resources/bin/droid. The assertion
- * fails if the app layout contains macOS Contents/Frameworks or lacks
- * the expected Linux resources path.
+ * files, and resources/app.asar. The system droid CLI is resolved from
+ * PATH/common install locations at runtime instead of bundled resources.
  */
 export function validateRuntimeLayout(
   appDir: string,
@@ -631,12 +657,7 @@ export function validateRuntimeLayout(
     errors.push("resources/app.asar not found in app directory.");
   }
 
-  // Check for resources/bin/droid
-  const droidPath = path.join(resourcesDir, "bin", "droid");
-  const hasDroid = fs.existsSync(droidPath);
-  if (!hasDroid) {
-    errors.push("resources/bin/droid not found in app directory.");
-  }
+  const hasDroid = !!resolveSystemDroidPath();
 
   // Determine if this is a Linux layout
   const isLinuxLayout = !hasMacPaths && hasResourcesDir;
@@ -770,19 +791,35 @@ export function validateAsarIntact(
 }
 
 /**
- * Validate that the bundled droid binary is an executable Linux ELF.
+ * Validate that the system droid CLI is an executable Linux ELF.
  *
- * VAL-RUNTIME-003: The assembled resources/bin/droid must be executable,
- * reported by file as Linux x86_64 ELF, and respond to --version from
- * the assembled resources location. The assertion fails for Mach-O,
- * missing execute bit, wrong architecture, or failed command.
+ * VAL-RUNTIME-003: The system droid CLI used by the packaged app must be
+ * executable, reported by file as Linux x86_64 ELF, and respond to --version.
+ * The assertion fails for Mach-O, missing execute bit, wrong architecture, or
+ * failed command.
  */
 export function validateDroidBinary(
-  appDir: string
+  _appDir: string,
+  explicitPath?: string
 ): DroidBinaryResult {
-  const droidPath = path.join(appDir, "resources", "bin", "droid");
-  const exists = fs.existsSync(droidPath);
+  const droidPath = resolveSystemDroidPath(explicitPath);
 
+  if (!droidPath) {
+    return {
+      valid: false,
+      exists: false,
+      path: "",
+      isElf: false,
+      isExecutable: false,
+      versionRan: false,
+      errors: [
+        "System droid CLI not found. Install droid so `command -v droid` works " +
+          "or place it at ~/.local/bin/droid, /usr/local/bin/droid, or /usr/bin/droid.",
+      ],
+    };
+  }
+
+  const exists = fs.existsSync(droidPath);
   if (!exists) {
     return {
       valid: false,
@@ -791,15 +828,13 @@ export function validateDroidBinary(
       isElf: false,
       isExecutable: false,
       versionRan: false,
-      errors: ["resources/bin/droid not found in assembled app."],
+      errors: [`System droid CLI not found at ${droidPath}.`],
     };
   }
 
-  // Classify the binary
   const classification = classifyBinary(droidPath);
   const isElf = classification.type === BinaryType.ELF;
 
-  // Check if the binary is Mach-O (must not be)
   if (classification.type === BinaryType.MachO) {
     return {
       valid: false,
@@ -811,13 +846,12 @@ export function validateDroidBinary(
       fileType: classification.fileOutput,
       versionRan: false,
       errors: [
-        `resources/bin/droid is macOS Mach-O (${classification.architecture || "unknown"}), ` +
-          `not Linux ELF. The macOS binary from the source DMG was not replaced.`
+        `System droid CLI is macOS Mach-O (${classification.architecture || "unknown"}), ` +
+          `not Linux ELF.`,
       ],
     };
   }
 
-  // Check executable permission
   let isExecutable = false;
   try {
     fs.accessSync(droidPath, fs.constants.X_OK);
@@ -836,13 +870,10 @@ export function validateDroidBinary(
       architecture: classification.architecture,
       fileType: classification.fileOutput,
       versionRan: false,
-      errors: [
-        "resources/bin/droid is not executable. The execute bit must be set.",
-      ],
+      errors: ["System droid CLI is not executable."],
     };
   }
 
-  // Check architecture
   if (isElf && classification.architecture !== "x86_64") {
     return {
       valid: false,
@@ -854,13 +885,12 @@ export function validateDroidBinary(
       fileType: classification.fileOutput,
       versionRan: false,
       errors: [
-        `resources/bin/droid is ELF but architecture is ${classification.architecture}, ` +
+        `System droid CLI is ELF but architecture is ${classification.architecture}, ` +
           `expected x86_64.`,
       ],
     };
   }
 
-  // Try running --version
   let versionRan = false;
   let versionOutput: string | undefined;
   const errors: string[] = [];
@@ -876,15 +906,13 @@ export function validateDroidBinary(
       versionOutput = output;
     } catch (err) {
       errors.push(
-        `Failed to run "droid --version": ${err instanceof Error ? err.message : String(err)}. ` +
-          `The binary may be corrupted or incompatible.`
+        `Failed to run "droid --version": ${err instanceof Error ? err.message : String(err)}.`
       );
     }
   } else if (!isElf) {
     errors.push(
-      `resources/bin/droid is not a Linux ELF binary. ` +
-        `file reports: ${classification.fileOutput || "unknown"}. ` +
-        `The macOS binary from the source DMG must be replaced with a Linux ELF.`
+      `System droid CLI is not a Linux ELF binary. ` +
+        `file reports: ${classification.fileOutput || "unknown"}.`
     );
   }
 
@@ -1030,36 +1058,28 @@ export function validateSharedLibraries(
 }
 
 /**
- * Check that the resources path resolves correctly for droid resolution.
+ * Check that the resources path and system droid resolution are valid.
  *
  * VAL-RUNTIME-011: A runtime diagnostic or IPC check must show that
  * Electron resolves process.resourcesPath to the packaged resources
- * directory and locates bin/droid from that path.
+ * directory and that the patched app can locate the system droid CLI.
  *
- * This function validates the directory structure that would make
- * process.resourcesPath resolution work correctly. It does NOT
- * actually launch the Electron app (that is for VAL-RUNTIME-004).
+ * This function validates the directory structure and the system droid
+ * resolver. It does NOT actually launch the Electron app (that is for
+ * VAL-RUNTIME-004).
  */
 export function checkResourcesPathResolution(
-  appDir: string
+  appDir: string,
+  explicitDroidPath?: string
 ): ResourcesPathResult {
   const errors: string[] = [];
-
-  // In a Linux Electron app, process.resourcesPath resolves to
-  // the "resources" directory next to the main executable
   const resourcesDir = path.join(appDir, "resources");
   const resourcesDirExists = fs.existsSync(resourcesDir);
-
   const appAsarPath = path.join(resourcesDir, "app.asar");
   const appAsarInResources = fs.existsSync(appAsarPath);
-
-  const droidBinPath = path.join(resourcesDir, "bin", "droid");
-  const binDroidInResources = fs.existsSync(droidBinPath);
-
-  // The expected resourcesPath value in the running app would be:
-  // <appDir>/resources
+  const systemDroidPath = resolveSystemDroidPath(explicitDroidPath);
+  const systemDroidAvailable = !!systemDroidPath;
   const expectedResourcesPath = resourcesDir;
-  const expectedDroidPath = droidBinPath;
 
   if (!resourcesDirExists) {
     errors.push("resources/ directory does not exist in the assembled app.");
@@ -1071,10 +1091,10 @@ export function checkResourcesPathResolution(
     );
   }
 
-  if (!binDroidInResources) {
+  if (!systemDroidAvailable) {
     errors.push(
-      "resources/bin/droid does not exist. The droid binary cannot be resolved " +
-        "from process.resourcesPath."
+      "System droid CLI is not available. The packaged app resolves droid from " +
+        "PATH/common system locations instead of resources/bin/droid."
     );
   }
 
@@ -1082,9 +1102,9 @@ export function checkResourcesPathResolution(
     valid: errors.length === 0,
     resourcesDirExists,
     appAsarInResources,
-    binDroidInResources,
+    systemDroidAvailable,
     expectedResourcesPath,
-    expectedDroidPath,
+    systemDroidPath,
     errors,
   };
 }
@@ -1352,9 +1372,9 @@ export function formatDroidBinaryResult(result: DroidBinaryResult): string {
   const lines: string[] = [];
 
   if (result.valid) {
-    lines.push("✓ resources/bin/droid validated.");
+    lines.push("✓ System droid CLI validated.");
   } else {
-    lines.push("✗ resources/bin/droid validation failed.");
+    lines.push("✗ System droid CLI validation failed.");
   }
 
   lines.push(`  Exists: ${result.exists}`);
@@ -1418,9 +1438,9 @@ export function formatResourcesPathResult(
 
   lines.push(`  resources/ exists: ${result.resourcesDirExists}`);
   lines.push(`  app.asar in resources: ${result.appAsarInResources}`);
-  lines.push(`  bin/droid in resources: ${result.binDroidInResources}`);
+  lines.push(`  system droid available: ${result.systemDroidAvailable}`);
   lines.push(`  Expected resourcesPath: ${result.expectedResourcesPath}`);
-  lines.push(`  Expected droid path: ${result.expectedDroidPath}`);
+  lines.push(`  System droid path: ${result.systemDroidPath || "not found"}`);
 
   for (const error of result.errors) {
     lines.push(`  ERROR: ${error}`);

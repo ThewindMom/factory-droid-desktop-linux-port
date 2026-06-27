@@ -97,6 +97,8 @@ export interface ValidateDaemonTransportResult {
   forcesWebSocketOnLinux: boolean;
   /** Whether the --listen ipc guard is present */
   hasListenIpcGuard: boolean;
+  /** Whether packaged Linux resolves droid from the system CLI */
+  hasSystemDroidPathPatch: boolean;
   /** Supported daemon flags from droid --help (if checked) */
   supportedDaemonFlags?: string[];
   /** Whether --listen appears in supported flags */
@@ -113,6 +115,7 @@ export interface ValidateDaemonTransportResult {
  * Marker comment injected into patched code to detect already-patched asars.
  */
 const PATCH_MARKER = "/* linux-daemon-transport-patch */";
+const SYSTEM_DROID_MARKER = "/* linux-system-droid-cli-patch */";
 
 /**
  * Regex matching the transport selection function.
@@ -142,7 +145,7 @@ const PATCH_MARKER = "/* linux-daemon-transport-patch */";
  * - `return` + ternary with `.Ipc` and `.WebSocket`
  */
 const TRANSPORT_RESOLVER_REGEX =
-  /(async function [\w$]+\(\)\{)(const \w+=\w+\.DesktopDaemonIpc;[\s\S]*?\?\w+\.Ipc:\w+\.WebSocket\})/;
+  /(async function [\w$]+\(\)\{)(const [\w$]+=[\w$]+\.DesktopDaemonIpc;[\s\S]*?\?[\w$]+\.Ipc:[\w$]+\.WebSocket\})/;
 
 /**
  * Build the replacement for the transport resolver.
@@ -155,8 +158,8 @@ function buildTransportResolverReplacement(
   prefix: string,
   body: string,
 ): string {
-  // Extract the WebSocket enum reference (e.g. "nc.WebSocket" or "Ms.WebSocket")
-  const wsMatch = body.match(/(\w+\.WebSocket)/);
+  // Extract the WebSocket enum reference (e.g. "nc.WebSocket", "Ms.WebSocket", or "$s.WebSocket")
+  const wsMatch = body.match(/([\w$]+\.WebSocket)/);
   const wsRef = wsMatch ? wsMatch[1] : '"".WebSocket'; // fallback should never hit
   return (
     prefix +
@@ -178,7 +181,7 @@ function buildTransportResolverReplacement(
  * `process.platform!=="linux"&&` before the push.
  */
 const LISTEN_IPC_PUSH_REGEX =
-  /(\w+\.Ipc)&&(\w+\.push\("--listen","ipc"\))/;
+  /([\w$]+\.Ipc)&&([\w$]+\.push\("--listen","ipc"\))/;
 
 /**
  * Build the replacement for the --listen ipc push.
@@ -188,6 +191,20 @@ function buildListenIpcReplacement(
   pushCall: string,
 ): string {
   return `${enumRef}&&process.platform!=="linux"&&${pushCall}`;
+}
+
+const PACKAGED_DROID_PATH_REGEX =
+  /(\w+)\.app\.isPackaged\)r=(\w+)\.join\(process\.resourcesPath,"bin",process\.platform==="win32"\?"droid\.exe":"droid"\)/;
+
+function buildSystemDroidPathReplacement(appAlias: string, pathAlias: string): string {
+  return (
+    `${appAlias}.app.isPackaged)r=process.platform==="linux"?(()=>{${SYSTEM_DROID_MARKER}` +
+    `try{const f=require("fs"),p=require("path"),cp=require("child_process"),os=require("os");` +
+    `if(process.env.FACTORY_DROID_PATH&&f.existsSync(process.env.FACTORY_DROID_PATH))return process.env.FACTORY_DROID_PATH;` +
+    `try{const v=cp.execFileSync("sh",["-lc","command -v droid"],{encoding:"utf-8",timeout:2000}).trim();if(v)return v}catch(e){}` +
+    `const c=[p.join(os.homedir(),".local","bin","droid"),"/usr/local/bin/droid","/usr/bin/droid"];for(const x of c)if(f.existsSync(x))return x;return c[0]` +
+    `}catch(e){return require("path").join(require("os").homedir(),".local","bin","droid")}})():${pathAlias}.join(process.resourcesPath,"bin",process.platform==="win32"?"droid.exe":"droid")`
+  );
 }
 
 // ─── Core Patching Functions ────────────────────────────────────────────────
@@ -277,7 +294,11 @@ export async function patchDaemonTransport(
       .extractFile(options.asarPath, bundleFile)
       .toString("utf-8");
 
-    if (skipIfPatched && content.includes(PATCH_MARKER)) {
+    if (
+      skipIfPatched &&
+      content.includes(PATCH_MARKER) &&
+      content.includes(SYSTEM_DROID_MARKER)
+    ) {
       alreadyPatched = true;
       warnings.push(`Bundle ${bundleFile} is already patched. Skipping.`);
       continue;
@@ -345,6 +366,36 @@ export async function patchDaemonTransport(
         originalSnippet: listenResult.match,
         replacementSnippet: "...add Linux guard...",
       });
+    }
+
+    // Patch 3: packaged Linux app must use the system droid CLI, not a
+    // resources/bin/droid copy that can drift from the user's remote daemon.
+    const systemDroidResult: RegexPatchResult = applyRegexPatch(
+      patchedContent,
+      PACKAGED_DROID_PATH_REGEX,
+      (_match, appAlias, pathAlias) => buildSystemDroidPathReplacement(appAlias, pathAlias),
+    );
+
+    if (systemDroidResult.matched) {
+      patchedContent = systemDroidResult.content;
+      filePatchCount++;
+      patches.push({
+        id: "use-system-droid-cli",
+        description:
+          "Resolve packaged Linux daemon binary from the system droid CLI " +
+          "instead of resources/bin/droid",
+        originalSnippet: systemDroidResult.match,
+        replacementSnippet: "...resolve system droid CLI...",
+      });
+    } else if (
+      content.includes("process.resourcesPath") &&
+      content.includes("droid-path") &&
+      !content.includes(SYSTEM_DROID_MARKER)
+    ) {
+      errors.push(
+        `Found packaged droid path logic in ${bundleFile} but system droid ` +
+          `regex did not match. Manual inspection required.`,
+      );
     }
     // If --listen ipc push isn't found, it may have already been patched or
     // the code structure changed. Not an error — the transport resolver
@@ -434,6 +485,7 @@ export function validateDaemonTransport(
       valid: false,
       forcesWebSocketOnLinux: false,
       hasListenIpcGuard: false,
+      hasSystemDroidPathPatch: false,
       listenFlagSupported: false,
       errors: [`app.asar not found: ${options.asarPath}`],
       warnings,
@@ -465,7 +517,7 @@ export function validateDaemonTransport(
 
       if (listenFlagSupported) {
         warnings.push(
-          "The bundled droid daemon supports --listen (choices: websocket/ipc). " +
+          "The system droid daemon supports --listen (choices: websocket/ipc). " +
             "The transport patch still forces WebSocket as defense-in-depth. " +
             `Supported flags: ${supportedDaemonFlags.join(", ")}`,
         );
@@ -482,6 +534,7 @@ export function validateDaemonTransport(
 
   let forcesWebSocketOnLinux = false;
   let hasListenIpcGuard = false;
+  let hasSystemDroidPathPatch = false;
 
   for (const bundleFile of mainBundleFiles) {
     const content = asar
@@ -551,14 +604,26 @@ export function validateDaemonTransport(
       // --listen exists but not in the expected push pattern
       hasListenIpcGuard = true; // Already patched or different structure
     }
+
+    if (content.includes(SYSTEM_DROID_MARKER)) {
+      hasSystemDroidPathPatch = true;
+    } else if (
+      content.includes("process.resourcesPath") &&
+      content.includes("droid-path")
+    ) {
+      errors.push(
+        "Packaged Linux daemon still resolves droid from process.resourcesPath/bin/droid.",
+      );
+    }
   }
 
-  const valid = errors.length === 0 && forcesWebSocketOnLinux;
+  const valid = errors.length === 0 && forcesWebSocketOnLinux && hasSystemDroidPathPatch;
 
   return {
     valid,
     forcesWebSocketOnLinux,
     hasListenIpcGuard,
+    hasSystemDroidPathPatch,
     supportedDaemonFlags,
     listenFlagSupported,
     errors,
@@ -623,6 +688,9 @@ export function formatDaemonTransportValidationResult(
   );
   lines.push(
     `  --listen ipc guard: ${result.hasListenIpcGuard ? "✓ Present" : "✗ Missing"}`,
+  );
+  lines.push(
+    `  System droid CLI resolver: ${result.hasSystemDroidPathPatch ? "✓ Present" : "✗ Missing"}`,
   );
   lines.push(
     `  --listen flag supported by droid: ${result.listenFlagSupported ? "Yes" : "No (as expected)"}`,

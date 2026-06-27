@@ -172,7 +172,8 @@ describe("patchAboutPanel", () => {
     expect(patchedContent).toContain("role','status");
     expect(patchedContent).toContain("pointer-events:auto");
     expect(patchedContent).toContain("Factory Desktop");
-    expect(patchedContent).toContain("Bundled Droid CLI");
+    expect(patchedContent).toContain("System Droid CLI");
+    expect(patchedContent).toContain("System Droid CLI not found");
     expect(patchedContent).toContain("top:38px");
     expect(patchedContent).toContain("min-width:220px");
     expect(patchedContent).toContain("white-space:pre-line");
@@ -182,6 +183,23 @@ describe("patchAboutPanel", () => {
     expect(patchedContent).toContain("Hide version status");
     expect(patchedContent).toContain("sessionStorage");
     expect(patchedContent).toContain("navigator.clipboard.writeText");
+    expect(patchedContent).toContain(String.raw`body.textContent=d.text.join('\\n')`);
+    expect(patchedContent).not.toContain(String.raw`body.textContent=d.text.join('\n')`);
+    const rendererJsExpression = patchedContent.match(
+      /const js=([\s\S]*?);_t\.webContents\.executeJavaScript/,
+    )?.[1];
+    expect(rendererJsExpression).toBeDefined();
+    const rendererJs = Function(
+      "payload",
+      `const js=${rendererJsExpression}; return js;`,
+    )({ text: ["Factory Desktop 0.116.1", "System Droid CLI 0.159.1"], command: "" });
+    expect(() => Function("d", rendererJs)).not.toThrow();
+    const separatorLiteral = rendererJs.match(/d\.text\.join\(([^)]*)\)/)?.[1];
+    expect(separatorLiteral).toBeDefined();
+    const renderedText = Function(
+      `return ["Factory Desktop 0.116.1","System Droid CLI 0.159.1"].join(${separatorLiteral});`,
+    )();
+    expect(renderedText).toBe("Factory Desktop 0.116.1\nSystem Droid CLI 0.159.1");
     expect(patchedContent).toContain("install-ready");
     expect(patchedContent).toContain("check-now");
     expect(patchedContent).toContain("Remote daemon");
@@ -283,13 +301,13 @@ describe("patchAboutPanel", () => {
     expect(migratedContent).toContain("top:38px");
     expect(migratedContent).toContain("min-width:220px");
     expect(migratedContent).toContain("Factory Desktop");
-    expect(migratedContent).toContain("Bundled Droid CLI");
+    expect(migratedContent).toContain("System Droid CLI");
     expect(migratedContent).not.toContain('parts.join(" · ")');
     expect(migratedTopContent).not.toContain("top:44px");
     expect(migratedTopContent).toContain("top:38px");
     expect(migratedTopContent).toContain("min-width:220px");
     expect(migratedTopContent).toContain("Factory Desktop");
-    expect(migratedTopContent).toContain("Bundled Droid CLI");
+    expect(migratedTopContent).toContain("System Droid CLI");
   });
 
   it("adds the visible chip to bundles that already have only the About patch", async () => {

@@ -171,35 +171,32 @@ The registry currently ships four core patches:
 
 - **`about-panel`** — augments the existing "About Factory" dialog on Linux
   (Help → About Factory) and injects a closeable top-right in-app status panel.
-  Both surfaces show the Factory Desktop version, the bundled droid CLI version,
-  and update state from the `factory-update-manager` daemon; the panel can also
-  show/copy a prepared manual command when a desktop update is ready or a stale
-  remote daemon is still running. Without this, users have no clear in-app way
-  to distinguish the desktop build, bundled CLI, and remote daemon state. The
-  patch reads `build-info.json` and `state.json` at runtime and degrades
-  gracefully to the original values if either file is missing.
+  Both surfaces show the Factory Desktop version, the system-installed droid CLI
+  version, and update state from the `factory-update-manager` daemon; the panel
+  can also show/copy a prepared manual command when a desktop update is ready or
+  a stale remote daemon is still running. Without this, users have no clear
+  in-app way to distinguish the desktop build, system CLI, and remote daemon
+  state. The patch reads `build-info.json` and `state.json` at runtime and
+  degrades gracefully to the original values if either file is missing.
 
 ### 3. Droid CLI binary
 
-The Linux `droid` binary is distributed as `@factory/cli-linux-x64` on npm —
-**not** from `downloads.factory.ai` (which returns 403 for all requests). The
-builder downloads the tarball from
-`https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-{version}.tgz`,
-extracts `package/bin/droid`, and stages it into `resources/bin/droid`.
+Factory Desktop Linux uses the **system-installed** `droid` CLI. It resolves
+`droid` from `PATH`, then common GUI-launch locations:
+`~/.local/bin/droid`, `/usr/local/bin/droid`, and `/usr/bin/droid`.
 
-Desktop version and CLI version don't always match (Desktop 0.110.0 has no
-CLI 0.110.0 on npm — it jumps from 0.109.3 to 0.111.0). The resolver always
-uses the **latest version from npm** to ensure all daemon JSON-RPC methods are
-supported (older versions like 0.109.3 lack `daemon.list_custom_models`, which
-breaks the Custom Models settings page).
+The package does **not** bundle `resources/bin/droid`. This keeps the app,
+the Droid Computers settings page, and any manually started
+`droid daemon --remote-access` on the same CLI version instead of showing
+conflicting "bundled" and daemon versions.
 
 ### 4. Assemble + package
 
 The runtime assembly
 ([`src/runtime-assembly.ts`](src/runtime-assembly.ts)) stages a Linux Electron
-app directory (`resources/app.asar` + `resources/bin/droid`), applies the
-registered patches, and validates the layout. `electron-builder` then produces
-native installers.
+app directory with `resources/app.asar`, applies the registered patches, and
+validates that a system `droid` CLI is available. `electron-builder` then
+produces native installers.
 
 ## Auto-Update Manager
 
@@ -373,7 +370,7 @@ make test            # cargo test
 | No window controls | The window-controls patch isn't applied — rebuild from latest source |
 | Daemon won't start | Check `~/.factory/logs/daemon-stderr.log` for transport errors — means the daemon-transport patch isn't applied |
 | `make build-app` fails | Run `node dist/cli.js check-tools` to verify all dependencies are installed |
-| Custom Models page empty | The bundled droid is too old — rebuild from latest source to get the latest droid from npm |
+| Custom Models page empty | Check the system `droid --version` and update your installed droid CLI; the Linux package does not bundle its own CLI |
 
 ## Disclaimer
 
