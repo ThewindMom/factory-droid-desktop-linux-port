@@ -178,7 +178,7 @@ function buildInjectedVisibleVersionChip(
 ): string {
   return (
     `${windowRef}.webContents.on("did-finish-load",()=>{${originalHandlerBody};` +
-    `(()=>{${CHIP_PATCH_MARKER}try{` +
+    `(()=>{${CHIP_PATCH_MARKER}const render=()=>{try{` +
     `const p=require("path"),f=require("fs"),cp=require("child_process"),os=require("os");` +
     `let r=p.dirname(process.execPath);` +
     `if(f.existsSync(p.join(r,".factory-linux","build-info.json"))===false)` +
@@ -209,7 +209,7 @@ function buildInjectedVisibleVersionChip(
     `const btn=document.createElement('button');btn.type='button';btn.id='factory-linux-version-update';btn.style.cssText='${CHIP_UPDATE_BUTTON_CSS}';btn.textContent='Copy update command';btn.onclick=async()=>{try{await navigator.clipboard.writeText(d.command);btn.textContent='Copied'}catch(_){btn.textContent=d.command}};e.appendChild(btn);document.body.appendChild(e)}` +
     `const body=e.querySelector('#factory-linux-version-chip-body');if(body)body.textContent=d.text.join('\\\\n');const code=e.querySelector('#factory-linux-version-command');if(code){code.textContent=d.command;code.style.display=d.command?'block':'none'}const btn=e.querySelector('#factory-linux-version-update');if(btn){btn.style.display=d.command?'block':'none';if(d.command)btn.textContent='Copy update command'}})()";` +
     `${windowRef}.webContents.executeJavaScript(js,true).catch(()=>{})` +
-    `}catch(e){}})()})`
+    `}catch(e){}};render();if(!${windowRef}.__factoryLinuxVersionChipTimer){${windowRef}.__factoryLinuxVersionChipTimer=setInterval(render,5000);${windowRef}.on("closed",()=>{clearInterval(${windowRef}.__factoryLinuxVersionChipTimer);${windowRef}.__factoryLinuxVersionChipTimer=null})}})()})`
   );
 }
 

@@ -185,6 +185,9 @@ describe("patchAboutPanel", () => {
     expect(patchedContent).toContain("navigator.clipboard.writeText");
     expect(patchedContent).toContain(String.raw`body.textContent=d.text.join('\\n')`);
     expect(patchedContent).not.toContain(String.raw`body.textContent=d.text.join('\n')`);
+    expect(patchedContent).toContain("const render=()=>{try{");
+    expect(patchedContent).toContain("__factoryLinuxVersionChipTimer");
+    expect(patchedContent).toContain("setInterval(render,5000)");
     const rendererJsExpression = patchedContent.match(
       /const js=([\s\S]*?);_t\.webContents\.executeJavaScript/,
     )?.[1];
