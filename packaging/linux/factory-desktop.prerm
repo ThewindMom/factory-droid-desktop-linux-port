@@ -14,14 +14,17 @@
 
 set -e
 
-UNIT="factory-update-manager.service"
+UPDATE_UNIT="factory-update-manager.service"
+DROID_UNIT="factory-droid-daemon.service"
 
 if command -v systemctl >/dev/null 2>&1; then
     for user_dir in /run/user/*/; do
         [ -d "$user_dir" ] || continue
         uid=$(basename "$user_dir")
-        systemctl --user --machine="$uid@.host" stop "$UNIT" >/dev/null 2>&1 || true
-        systemctl --user --machine="$uid@.host" disable "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" stop "$UPDATE_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$UPDATE_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" stop "$DROID_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$DROID_UNIT" >/dev/null 2>&1 || true
     done
 fi
 

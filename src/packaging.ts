@@ -202,6 +202,8 @@ export interface DebValidationResult {
   droidIsExecutable: boolean;
   /** Whether desktop integration files are present */
   hasDesktopIntegration: boolean;
+  /** Whether the Factory Droid daemon user service unit is packaged */
+  hasDroidDaemonService: boolean;
   /** Detailed errors */
   errors: string[];
 }
@@ -559,6 +561,34 @@ function buildUpdaterExtraFiles(
 
   return { extraFiles };
 }
+
+/**
+ * Build extraFiles entries for the user-owned Factory Droid daemon service.
+ *
+ * The service is staged inside the app directory, then the maintainer script
+ * installs it to /usr/lib/systemd/user/. It runs the already-installed system
+ * `droid` CLI with both remote-access and Desktop IPC flags so Factory Desktop
+ * can adopt that daemon instead of spawning its own child process.
+ */
+function buildDroidDaemonExtraFiles(
+  projectRoot: string
+): { extraFiles: Array<{ from: string; to: string }> } | undefined {
+  const serviceFile = path.join(
+    projectRoot,
+    "packaging",
+    "linux",
+    "factory-droid-daemon.service"
+  );
+  if (!fs.existsSync(serviceFile)) return undefined;
+  return {
+    extraFiles: [
+      {
+        from: serviceFile,
+        to: ".factory-linux/updater/factory-droid-daemon.service",
+      },
+    ],
+  };
+}
 /**
  * Build extraFiles entries for hicolor theme icons. These are always
  * included regardless of whether the updater is bundled — the taskbar/dock
@@ -639,13 +669,12 @@ export function createElectronBuilderConfig(options: PackageBuildOptions, projec
       afterRemove: "packaging/linux/factory-desktop.postrm",
     },
     // extraFiles is a top-level Configuration property (not deb-specific).
-    // Bundles the update manager binary, systemd unit, polkit policy, and
-    // updater source into the package. Files are staged within the app dir
-    // (under .factory-linux/) because electron-builder's extraFiles 'to'
-    // paths are relative to the app's unpacked directory, not absolute
-    // filesystem paths. The postinst script copies them to system paths.
+    // Bundles the updater/service files and desktop icon assets. Files staged
+    // under .factory-linux/ are copied to system paths by postinst; absolute
+    // hicolor icon paths are handled directly by electron-builder.
     extraFiles: [
       ...(buildUpdaterExtraFiles(options, projectRoot)?.extraFiles || []),
+      ...(buildDroidDaemonExtraFiles(projectRoot)?.extraFiles || []),
       ...(buildHicolorIconExtraFiles(projectRoot)?.extraFiles || []),
     ],
     appImage: {
@@ -731,6 +760,7 @@ export function validateDebPackage(debPath: string): DebValidationResult {
       hasDroid: false,
       droidIsExecutable: false,
       hasDesktopIntegration: false,
+      hasDroidDaemonService: false,
       errors: [`Debian package not found: ${debPath}`],
     };
   }
@@ -778,6 +808,7 @@ export function validateDebPackage(debPath: string): DebValidationResult {
       hasDroid: false,
       droidIsExecutable: false,
       hasDesktopIntegration: false,
+      hasDroidDaemonService: false,
       errors,
     };
   }
@@ -787,11 +818,13 @@ export function validateDebPackage(debPath: string): DebValidationResult {
   let hasDroid = false;
   let droidIsExecutable = false;
   let hasDesktopIntegration = false;
+  let hasDroidDaemonService = false;
 
   try {
     const contentsOutput = execSync(`dpkg-deb --contents "${debPath}"`, {
       encoding: "utf-8",
       timeout: 30000,
+      maxBuffer: 64 * 1024 * 1024,
     });
 
     const lines = contentsOutput.split("\n");
@@ -826,6 +859,11 @@ export function validateDebPackage(debPath: string): DebValidationResult {
       if (filePath.includes("icons/") || filePath.includes("pixmaps/")) {
         hasDesktopIntegration = true;
       }
+
+      // Check for the user-owned Droid daemon service.
+      if (filePath.includes("factory-droid-daemon.service")) {
+        hasDroidDaemonService = true;
+      }
     }
 
     if (!hasAppAsar) {
@@ -833,6 +871,9 @@ export function validateDebPackage(debPath: string): DebValidationResult {
     }
     if (hasDroid && !droidIsExecutable) {
       errors.push("Bundled resources/bin/droid is present but not executable.");
+    }
+    if (!hasDroidDaemonService) {
+      errors.push("factory-droid-daemon.service not found in .deb package contents.");
     }
   } catch (err) {
     errors.push(`Failed to read .deb contents: ${String(err)}`);
@@ -849,6 +890,7 @@ export function validateDebPackage(debPath: string): DebValidationResult {
     hasDroid,
     droidIsExecutable,
     hasDesktopIntegration,
+    hasDroidDaemonService,
     errors,
   };
 }
@@ -1554,6 +1596,7 @@ export function formatDebValidationResult(result: DebValidationResult): string {
   lines.push(`bundled resources/bin/droid absent: ${!result.hasDroid ? "✓" : "✗"}`);
   lines.push(`bundled droid executable: ${result.droidIsExecutable ? "✓" : "n/a"}`);
   lines.push(`Desktop integration: ${result.hasDesktopIntegration ? "✓" : "✗"}`);
+  lines.push(`Factory Droid daemon service: ${result.hasDroidDaemonService ? "✓" : "✗"}`);
 
   if (result.errors.length > 0) {
     lines.push("Errors:");

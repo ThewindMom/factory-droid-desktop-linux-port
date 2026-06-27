@@ -108,16 +108,16 @@ interface GenericPatchResult {
 // ─── Registered patches ─────────────────────────────────────────────────────
 
 /**
- * The daemon transport patch forces WebSocket transport on Linux so the app
- * never emits `droid daemon --listen ipc`. While the latest droid CLI supports
- * `--listen` with choices websocket/ipc, IPC transport is unreliable on Linux.
- * Registered first because it gates daemon reachability.
+ * The daemon transport patch forces WebSocket transport on Linux and makes
+ * Factory Desktop adopt the user-owned system Droid daemon. It prevents
+ * `droid daemon --listen ipc` and prevents a second Desktop-owned daemon from
+ * replacing the remote relay connection.
  */
 const daemonTransportPatch: Patch = {
   id: "daemon-transport",
   description:
-    "Force WebSocket daemon transport on Linux and guard against " +
-    "`--listen ipc` (IPC transport is unreliable on Linux).",
+    "Force WebSocket daemon transport on Linux and adopt the user-owned " +
+    "system Droid daemon instead of spawning a competing child daemon.",
   apply: (options) =>
     patchDaemonTransport({
       asarPath: options.asarPath,

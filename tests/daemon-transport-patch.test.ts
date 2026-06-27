@@ -137,7 +137,8 @@ describe("patchDaemonTransport", () => {
     fsSync.mkdirSync(buildDir, { recursive: true });
     const bundleContent =
       TRANSPORT_0_106_0 +
-      'function hKe({port:e,transportMode:t}){let r,o,s=[];if(q.app.isPackaged)r=Ne.join(process.resourcesPath,"bin",process.platform==="win32"?"droid.exe":"droid");const i=r;const a=[...s,"daemon","--enable-child-ipc","--droid-path",i];if(t===nc.Ipc&&a.push("--listen","ipc"))return a}';
+      'function hKe({port:e,transportMode:t}){let r,o,s=[];if(q.app.isPackaged)r=Ne.join(process.resourcesPath,"bin",process.platform==="win32"?"droid.exe":"droid");const i=r;const a=[...s,"daemon","--enable-child-ipc","--droid-path",i];if(t===nc.Ipc&&a.push("--listen","ipc"))return a}' +
+      'class NKe{constructor(){this.state=xn.Stopped,this.currentPort=null,this.transportMode=null,this.ipcDaemonReady=false,this.processGeneration=0}selectPort(){return Fp()}async resolveTransportMode(){return nc.WebSocket}startHealthPoll(){}async startInternal(){this.state=xn.Starting,this.ipcDaemonReady=!1;const t=await this.resolveTransportMode(),n=t===nc.Ipc,r=n?null:this.currentPort??this.selectPort();this.currentPort=r;const{command:o,args:s,cwd:i,env:a}=hKe({port:r,transportMode:t});me("[daemon] Starting daemon",{command:o,args:s,cwd:i,port:r??void 0,state:t});this.processGeneration++,ze.endPhase(),n?this.startIpcReadyTimeout():this.startHealthPoll()}}';
     fsSync.writeFileSync(path.join(buildDir, "index-SystemDroid.js"), bundleContent);
     const asarPath = path.join(tmpDir, "app.asar");
     await asar.createPackage(tmpDir, asarPath);
@@ -147,10 +148,12 @@ describe("patchDaemonTransport", () => {
       expect(patchResult.success).toBe(true);
       expect(patchResult.patched).toBe(true);
       expect(patchResult.patches.map((p) => p.id)).toContain("use-system-droid-cli");
+      expect(patchResult.patches.map((p) => p.id)).toContain("adopt-system-droid-daemon");
 
       const validation = validateDaemonTransport({ asarPath });
       expect(validation.valid).toBe(true);
       expect(validation.hasSystemDroidPathPatch).toBe(true);
+      expect(validation.hasSystemDaemonAdoptionPatch).toBe(true);
       const patchedContent = asar
         .extractFile(asarPath, ".vite/build/index-SystemDroid.js")
         .toString("utf-8");
@@ -158,6 +161,9 @@ describe("patchDaemonTransport", () => {
       expect(patchedContent).toContain("FACTORY_DROID_PATH");
       expect(patchedContent).toContain('process.platform==="linux"');
       expect(patchedContent).toContain('"command -v droid"');
+      expect(patchedContent).toContain("/* linux-system-droid-daemon-adoption-patch */");
+      expect(patchedContent).toContain("Adopted system Droid daemon");
+      expect(patchedContent).toContain("const servicePort=37643");
     } finally {
       fsSync.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -203,6 +209,7 @@ describe("patchDaemonTransport", () => {
       expect(result.forcesWebSocketOnLinux).toBe(true);
       expect(result.hasListenIpcGuard).toBe(true);
       expect(result.hasSystemDroidPathPatch).toBe(true);
+      expect(result.hasSystemDaemonAdoptionPatch).toBe(true);
     });
 
     it("droid daemon supports --listen flag (latest droid)", () => {
@@ -317,6 +324,7 @@ describe("formatDaemonTransportValidationResult", () => {
       forcesWebSocketOnLinux: true,
       hasListenIpcGuard: true,
       hasSystemDroidPathPatch: true,
+      hasSystemDaemonAdoptionPatch: true,
       listenFlagSupported: false,
       errors: [],
       warnings: [],
@@ -334,6 +342,7 @@ describe("formatDaemonTransportValidationResult", () => {
       hasListenIpcGuard: false,
       listenFlagSupported: false,
       hasSystemDroidPathPatch: false,
+      hasSystemDaemonAdoptionPatch: false,
       errors: ["IPC transport can still be selected"],
       warnings: [],
     });
@@ -349,6 +358,7 @@ describe("formatDaemonTransportValidationResult", () => {
       hasListenIpcGuard: true,
       listenFlagSupported: false,
       hasSystemDroidPathPatch: true,
+      hasSystemDaemonAdoptionPatch: true,
       supportedDaemonFlags: ["--host", "--port", "--unix"],
       errors: [],
       warnings: [],

@@ -33,7 +33,7 @@ const PROPRIETARY_BINARY_PATTERNS = [
 /** Source file extensions that should never be flagged as proprietary binaries */
 const SOURCE_EXTENSIONS = new Set([
   ".ts", ".js", ".tsx", ".jsx", ".json", ".md", ".yaml", ".yml",
-  ".css", ".html", ".sh", ".py",
+  ".css", ".html", ".sh", ".py", ".service",
 ]);
 
 /** Tracked artifact for cleanup on failure */

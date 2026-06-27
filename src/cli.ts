@@ -2959,14 +2959,22 @@ program
         ) + "\n"
       );
 
-      // Stage updater files into the app directory so electron-builder's
-      // --prepackaged mode includes them. (extraFiles are NOT processed
-      // with --prepackaged, so we must copy files physically into appDir.)
-      // postinst copies these from the app dir to system paths.
+      // Stage package support files into the app directory so
+      // electron-builder's --prepackaged mode includes them. (extraFiles are
+      // NOT processed with --prepackaged, so we must copy files physically into
+      // appDir.) postinst copies these from the app dir to system paths.
+      const projectRoot = process.cwd();
+      const updaterStagingDir = path.join(factoryLinuxDir, "updater");
+      fs.mkdirSync(updaterStagingDir, { recursive: true });
+
+      // Factory Droid daemon service is required even when the update manager
+      // payload is disabled, because the app now adopts this user-owned daemon.
+      const droidServiceFile = path.join(projectRoot, "packaging", "linux", "factory-droid-daemon.service");
+      if (fs.existsSync(droidServiceFile)) {
+        fs.copyFileSync(droidServiceFile, path.join(updaterStagingDir, "factory-droid-daemon.service"));
+      }
+
       if (process.env.PACKAGE_WITH_UPDATER !== "0") {
-        const projectRoot = process.cwd();
-        const updaterStagingDir = path.join(factoryLinuxDir, "updater");
-        fs.mkdirSync(updaterStagingDir, { recursive: true });
 
         // Updater binary
         const updaterBinary = path.join(

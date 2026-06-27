@@ -131,6 +131,14 @@ function createMockDeb(outputDir: string, execName = "factory-desktop"): string 
     "[Desktop Entry]\nName=Factory\nExec=factory-desktop\nType=Application\nMimeType=x-scheme-handler/factory-desktop;\n"
   );
 
+  // Create user systemd service
+  const userServiceDir = path.join(debDir, "usr", "lib", "systemd", "user");
+  fs.mkdirSync(userServiceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userServiceDir, "factory-droid-daemon.service"),
+    "[Unit]\nDescription=Factory Droid daemon\n[Service]\nExecStart=/bin/true\n"
+  );
+
   // Build the .deb
   const debPath = path.join(outputDir, `factory-desktop_0.106.0_amd64.deb`);
   try {
@@ -298,6 +306,7 @@ describe("packaging", () => {
         expect(result.hasDroid).toBe(true);
         expect(result.droidIsExecutable).toBe(true);
         expect(result.hasDesktopIntegration).toBe(true);
+        expect(result.hasDroidDaemonService).toBe(true);
       } finally {
         cleanupTempDir(tempDir);
       }
@@ -744,6 +753,7 @@ describe("packaging", () => {
         hasDroid: true,
         droidIsExecutable: true,
         hasDesktopIntegration: true,
+        hasDroidDaemonService: true,
         errors: [],
       });
 
@@ -943,6 +953,14 @@ describe("packaging", () => {
       const deb = config.deb as Record<string, unknown>;
       expect(deb.afterInstall).toBe("packaging/linux/factory-desktop.postinst");
       expect(deb.afterRemove).toBe("packaging/linux/factory-desktop.postrm");
+      const extraFiles = config.extraFiles as Array<{ from: string; to: string }>;
+      expect(extraFiles).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            to: ".factory-linux/updater/factory-droid-daemon.service",
+          }),
+        ])
+      );
     });
   });
 });

@@ -99,6 +99,8 @@ export interface ValidateDaemonTransportResult {
   hasListenIpcGuard: boolean;
   /** Whether packaged Linux resolves droid from the system CLI */
   hasSystemDroidPathPatch: boolean;
+  /** Whether Linux adopts the user-owned system daemon instead of spawning one */
+  hasSystemDaemonAdoptionPatch: boolean;
   /** Supported daemon flags from droid --help (if checked) */
   supportedDaemonFlags?: string[];
   /** Whether --listen appears in supported flags */
@@ -116,6 +118,7 @@ export interface ValidateDaemonTransportResult {
  */
 const PATCH_MARKER = "/* linux-daemon-transport-patch */";
 const SYSTEM_DROID_MARKER = "/* linux-system-droid-cli-patch */";
+const SYSTEM_DAEMON_ADOPTION_MARKER = "/* linux-system-droid-daemon-adoption-patch */";
 
 /**
  * Regex matching the transport selection function.
@@ -204,6 +207,39 @@ function buildSystemDroidPathReplacement(appAlias: string, pathAlias: string): s
     `try{const v=cp.execFileSync("sh",["-lc","command -v droid"],{encoding:"utf-8",timeout:2000}).trim();if(v)return v}catch(e){}` +
     `const c=[p.join(os.homedir(),".local","bin","droid"),"/usr/local/bin/droid","/usr/bin/droid"];for(const x of c)if(f.existsSync(x))return x;return c[0]` +
     `}catch(e){return require("path").join(require("os").homedir(),".local","bin","droid")}})():${pathAlias}.join(process.resourcesPath,"bin",process.platform==="win32"?"droid.exe":"droid")`
+  );
+}
+
+const DAEMON_START_ADOPTION_REGEX =
+  /this\.currentPort=([\w$]+);const\{command:([\w$]+),args:([\w$]+),cwd:([\w$]+),env:([\w$]+)\}=([\w$]+)\(\{port:\1,transportMode:([\w$]+)\}\);([\w$]+)\("\[daemon\] Starting daemon"/;
+
+function findStartupTrackerAlias(content: string): string | null {
+  const match = content.match(/this\.processGeneration\+\+,([\w$]+)\.endPhase\(\),/);
+  return match ? match[1] : null;
+}
+
+function buildSystemDaemonAdoptionReplacement(
+  portVar: string,
+  commandVar: string,
+  argsVar: string,
+  cwdVar: string,
+  envVar: string,
+  commandBuilder: string,
+  transportVar: string,
+  loggerVar: string,
+  trackerAlias: string | null,
+): string {
+  const trackerRef = trackerAlias
+    ? `typeof ${trackerAlias}!=="undefined"?${trackerAlias}:null`
+    : "null";
+  return (
+    `this.currentPort=${portVar};` +
+    `if(process.platform==="linux"&&${portVar}!==null){${SYSTEM_DAEMON_ADOPTION_MARKER}` +
+    `const servicePort=37643;this.currentPort=servicePort;` +
+    `let ok=false;try{const fs=require("fs");for(const pid of fs.readdirSync("/proc")){if(!/^\\d+$/.test(pid))continue;let cmd="";try{cmd=fs.readFileSync("/proc/"+pid+"/cmdline","utf-8").replace(/\\0/g," ")}catch(e){}if(cmd.includes("droid")&&cmd.includes("daemon")&&cmd.includes("--remote-access")&&cmd.includes("--enable-child-ipc")&&(cmd.includes("--port "+servicePort)||cmd.includes("--port="+servicePort))){ok=true;break}}}catch(e){}` +
+    `if(ok){try{const res=await fetch("http://127.0.0.1:"+servicePort+"/health",{signal:AbortSignal.timeout(2000)});const body=(await res.text()).trim();if(res.ok&&(body==="factory-daemon ok"||body.startsWith("factory-daemon ok ")||body==="ok")){this.lastStaleCheckOutcome="adopted_system_daemon";this.process=null;this.state="running";this.processGeneration++;const z=${trackerRef};if(z&&z.endPhase)z.endPhase();${loggerVar}("[daemon] Adopted system Droid daemon",{port:servicePort});this.startHealthPoll();return}}catch(e){}}` +
+    `this.lastStaleCheckOutcome="system_daemon_missing";this.state="stopped";this.currentPort=null;this.transportMode=null;this.ipcDaemonReady=false;{const z=${trackerRef};if(z&&z.markOutcome)z.markOutcome("daemon_spawn_failed","system Droid daemon not running on port 37643");if(z&&z.finalize)z.finalize()}return}` +
+    `const{command:${commandVar},args:${argsVar},cwd:${cwdVar},env:${envVar}}=${commandBuilder}({port:${portVar},transportMode:${transportVar}});${loggerVar}("[daemon] Starting daemon"`
   );
 }
 
@@ -297,7 +333,8 @@ export async function patchDaemonTransport(
     if (
       skipIfPatched &&
       content.includes(PATCH_MARKER) &&
-      content.includes(SYSTEM_DROID_MARKER)
+      content.includes(SYSTEM_DROID_MARKER) &&
+      content.includes(SYSTEM_DAEMON_ADOPTION_MARKER)
     ) {
       alreadyPatched = true;
       warnings.push(`Bundle ${bundleFile} is already patched. Skipping.`);
@@ -397,6 +434,59 @@ export async function patchDaemonTransport(
           `regex did not match. Manual inspection required.`,
       );
     }
+
+    // Patch 4: packaged Linux should adopt the systemd/user-owned droid
+    // daemon instead of spawning a second Desktop-owned daemon that competes
+    // for the same local port and remote relay computer identity.
+    const trackerAlias = findStartupTrackerAlias(patchedContent);
+    const adoptionResult: RegexPatchResult = applyRegexPatch(
+      patchedContent,
+      DAEMON_START_ADOPTION_REGEX,
+      (
+        _match,
+        portVar,
+        commandVar,
+        argsVar,
+        cwdVar,
+        envVar,
+        commandBuilder,
+        transportVar,
+        loggerVar,
+      ) =>
+        buildSystemDaemonAdoptionReplacement(
+          portVar,
+          commandVar,
+          argsVar,
+          cwdVar,
+          envVar,
+          commandBuilder,
+          transportVar,
+          loggerVar,
+          trackerAlias,
+        ),
+    );
+
+    if (adoptionResult.matched) {
+      patchedContent = adoptionResult.content;
+      filePatchCount++;
+      patches.push({
+        id: "adopt-system-droid-daemon",
+        description:
+          "Adopt the user-owned Linux droid daemon instead of spawning a " +
+          "competing Desktop-owned daemon",
+        originalSnippet: adoptionResult.match.substring(0, 120) + "...",
+        replacementSnippet: "...adopt system droid daemon...",
+      });
+    } else if (
+      content.includes("startInternal()") &&
+      content.includes("--enable-child-ipc") &&
+      !content.includes(SYSTEM_DAEMON_ADOPTION_MARKER)
+    ) {
+      errors.push(
+        `Found daemon startup logic in ${bundleFile} but system daemon adoption ` +
+          `regex did not match. Manual inspection required.`,
+      );
+    }
     // If --listen ipc push isn't found, it may have already been patched or
     // the code structure changed. Not an error — the transport resolver
     // patch is the primary fix.
@@ -486,6 +576,7 @@ export function validateDaemonTransport(
       forcesWebSocketOnLinux: false,
       hasListenIpcGuard: false,
       hasSystemDroidPathPatch: false,
+      hasSystemDaemonAdoptionPatch: false,
       listenFlagSupported: false,
       errors: [`app.asar not found: ${options.asarPath}`],
       warnings,
@@ -535,7 +626,7 @@ export function validateDaemonTransport(
   let forcesWebSocketOnLinux = false;
   let hasListenIpcGuard = false;
   let hasSystemDroidPathPatch = false;
-
+  let hasSystemDaemonAdoptionPatch = false;
   for (const bundleFile of mainBundleFiles) {
     const content = asar
       .extractFile(options.asarPath, bundleFile)
@@ -615,15 +706,32 @@ export function validateDaemonTransport(
         "Packaged Linux daemon still resolves droid from process.resourcesPath/bin/droid.",
       );
     }
+
+    if (content.includes(SYSTEM_DAEMON_ADOPTION_MARKER)) {
+      hasSystemDaemonAdoptionPatch = true;
+    } else if (
+      content.includes("startInternal()") &&
+      content.includes("--enable-child-ipc")
+    ) {
+      errors.push(
+        "Packaged Linux desktop can still spawn a Desktop-owned droid daemon " +
+          "instead of adopting the user-owned system daemon.",
+      );
+    }
   }
 
-  const valid = errors.length === 0 && forcesWebSocketOnLinux && hasSystemDroidPathPatch;
+  const valid =
+    errors.length === 0 &&
+    forcesWebSocketOnLinux &&
+    hasSystemDroidPathPatch &&
+    hasSystemDaemonAdoptionPatch;
 
   return {
     valid,
     forcesWebSocketOnLinux,
     hasListenIpcGuard,
     hasSystemDroidPathPatch,
+    hasSystemDaemonAdoptionPatch,
     supportedDaemonFlags,
     listenFlagSupported,
     errors,
@@ -691,6 +799,9 @@ export function formatDaemonTransportValidationResult(
   );
   lines.push(
     `  System droid CLI resolver: ${result.hasSystemDroidPathPatch ? "✓ Present" : "✗ Missing"}`,
+  );
+  lines.push(
+    `  System droid daemon adoption: ${result.hasSystemDaemonAdoptionPatch ? "✓ Present" : "✗ Missing"}`,
   );
   lines.push(
     `  --listen flag supported by droid: ${result.listenFlagSupported ? "Yes" : "No (as expected)"}`,

@@ -1,0 +1,15 @@
+[Unit]
+Description=Factory Droid daemon
+Documentation=https://github.com/thewindmom/factory-droid-desktop-linux-port
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=/bin/sh -lc 'd=$FACTORY_DROID_PATH; if [ -z "$d" ]; then d=$(command -v droid 2>/dev/null || true); fi; if [ -z "$d" ]; then d="$HOME/.local/bin/droid"; fi; exec "$d" daemon --remote-access --enable-child-ipc --droid-path "$d" --host 127.0.0.1 --port 37643'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

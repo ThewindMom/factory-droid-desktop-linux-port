@@ -1,6 +1,6 @@
 #!/bin/sh
-# postrm hook for factory-desktop deb package.
-# Stops/disables the update-manager service (on remove) and reloads
+# postrm hook for factory-desktop deb/rpm package.
+# Stops/disables Factory --user services (on remove) and reloads
 # systemd (on purge). fpm's afterRemove runs for both --remove and
 # --purge; we handle both here since electron-builder does not support
 # a prerm/beforeRemove script.
@@ -12,14 +12,17 @@
 
 set -e
 
-UNIT="factory-update-manager.service"
+UPDATE_UNIT="factory-update-manager.service"
+DROID_UNIT="factory-droid-daemon.service"
 
 if command -v systemctl >/dev/null 2>&1; then
     for user_dir in /run/user/*/; do
         [ -d "$user_dir" ] || continue
         uid=$(basename "$user_dir")
-        systemctl --user --machine="$uid@.host" stop "$UNIT" >/dev/null 2>&1 || true
-        systemctl --user --machine="$uid@.host" disable "$UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" stop "$UPDATE_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$UPDATE_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" stop "$DROID_UNIT" >/dev/null 2>&1 || true
+        systemctl --user --machine="$uid@.host" disable "$DROID_UNIT" >/dev/null 2>&1 || true
         systemctl --user --machine="$uid@.host" daemon-reload >/dev/null 2>&1 || true
     done
     systemctl daemon-reload >/dev/null 2>&1 || true

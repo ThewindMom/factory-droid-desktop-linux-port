@@ -149,11 +149,12 @@ hardcoded minified strings — so they survive upstream version bumps.
 
 The registry currently ships four core patches:
 
-- **`daemon-transport`** — forces WebSocket daemon transport on Linux and guards
-  against `droid daemon --listen ipc`. While the latest droid CLI supports
-  `--listen` with choices `websocket`/`ipc`, IPC transport is unreliable on
-  Linux due to missing IPC channel setup. The patch forces WebSocket as
-  defense-in-depth.
+- **`daemon-transport`** — forces WebSocket daemon transport on Linux, guards
+  against `droid daemon --listen ipc`, and makes the app adopt the user-owned
+  Factory Droid daemon instead of spawning a competing Desktop-owned child
+  daemon. The packaged user service runs the system `droid` CLI with both
+  `--remote-access` and `--enable-child-ipc`, so Droid Computers and the
+  local Desktop backend share one daemon identity.
 
 - **`auto-updater`** — guards `autoUpdater.checkForUpdates()` and
   `autoUpdater.quitAndInstall()` with `process.platform!=="linux"`. Factory
@@ -170,14 +171,13 @@ The registry currently ships four core patches:
   no title bar at all.
 
 - **`about-panel`** — augments the existing "About Factory" dialog on Linux
-  (Help → About Factory) and injects a closeable top-right in-app status panel.
-  Both surfaces show the Factory Desktop version, the system-installed droid CLI
-  version, and update state from the `factory-update-manager` daemon; the panel
-  can also show/copy a prepared manual command when a desktop update is ready or
-  a stale remote daemon is still running. Without this, users have no clear
-  in-app way to distinguish the desktop build, system CLI, and remote daemon
-  state. The patch reads `build-info.json` and `state.json` at runtime and
-  degrades gracefully to the original values if either file is missing.
+  (Help → About Factory) and injects a closeable top-right in-app update panel.
+  The About dialog shows detailed build/runtime versions. The in-app panel is
+  intentionally narrower: it appears only when `factory-update-manager` reports
+  a newer Factory Desktop candidate, then shows the current/latest desktop
+  versions and a copyable update-manager command. It hides itself when the
+  installed desktop version is current, so normal use is not cluttered with CLI
+  or daemon implementation details.
 
 ### 3. Droid CLI binary
 
@@ -185,10 +185,18 @@ Factory Desktop Linux uses the **system-installed** `droid` CLI. It resolves
 `droid` from `PATH`, then common GUI-launch locations:
 `~/.local/bin/droid`, `/usr/local/bin/droid`, and `/usr/bin/droid`.
 
-The package does **not** bundle `resources/bin/droid`. This keeps the app,
-the Droid Computers settings page, and any manually started
-`droid daemon --remote-access` on the same CLI version instead of showing
-conflicting "bundled" and daemon versions.
+The package does **not** bundle `resources/bin/droid`. Native `.deb`/`.rpm`
+installs ship a `factory-droid-daemon.service` systemd user unit that resolves
+the system `droid` CLI and runs:
+
+```bash
+droid daemon --remote-access --enable-child-ipc --droid-path <system-droid> --host 127.0.0.1 --port 37643
+```
+
+This keeps the app, the Droid Computers settings page, and remote relay
+registration on one CLI version and one daemon identity. AppImage users should
+run an equivalent user service manually because AppImage does not install
+systemd units.
 
 ### 4. Assemble + package
 
@@ -368,7 +376,7 @@ make test            # cargo test
 | Problem | First thing to try |
 |---|---|
 | No window controls | The window-controls patch isn't applied — rebuild from latest source |
-| Daemon won't start | Check `~/.factory/logs/daemon-stderr.log` for transport errors — means the daemon-transport patch isn't applied |
+| Daemon won't start | Run `systemctl --user status factory-droid-daemon.service` and check `~/.factory/logs/daemon-stderr.log`; the Desktop should adopt that user service, not spawn its own daemon |
 | `make build-app` fails | Run `node dist/cli.js check-tools` to verify all dependencies are installed |
 | Custom Models page empty | Check the system `droid --version` and update your installed droid CLI; the Linux package does not bundle its own CLI |
 

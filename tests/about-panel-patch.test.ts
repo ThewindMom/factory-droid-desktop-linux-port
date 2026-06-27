@@ -173,14 +173,16 @@ describe("patchAboutPanel", () => {
     expect(patchedContent).toContain("pointer-events:auto");
     expect(patchedContent).toContain("Factory Desktop");
     expect(patchedContent).toContain("System Droid CLI");
-    expect(patchedContent).toContain("System Droid CLI not found");
+    expect(patchedContent).not.toContain("System Droid CLI not found");
+    expect(patchedContent).not.toContain("System daemon running");
+    expect(patchedContent).not.toContain("System daemon not running");
     expect(patchedContent).toContain("top:38px");
     expect(patchedContent).toContain("min-width:220px");
     expect(patchedContent).toContain("white-space:pre-line");
     expect(patchedContent).toContain("factory-linux-version-update");
     expect(patchedContent).toContain("Copy update command");
-    expect(patchedContent).toContain("factory-linux-version-command");
-    expect(patchedContent).toContain("Hide version status");
+    expect(patchedContent).toContain("Copy install command");
+    expect(patchedContent).toContain("Hide update status");
     expect(patchedContent).toContain("sessionStorage");
     expect(patchedContent).toContain("navigator.clipboard.writeText");
     expect(patchedContent).toContain(String.raw`body.textContent=d.text.join('\\n')`);
@@ -188,25 +190,38 @@ describe("patchAboutPanel", () => {
     expect(patchedContent).toContain("const render=()=>{try{");
     expect(patchedContent).toContain("__factoryLinuxVersionChipTimer");
     expect(patchedContent).toContain("setInterval(render,5000)");
-    const rendererJsExpression = patchedContent.match(
-      /const js=([\s\S]*?);_t\.webContents\.executeJavaScript/,
-    )?.[1];
+    const rendererMatches = [
+      ...patchedContent.matchAll(
+        /const js=([\s\S]*?);_t\.webContents\.executeJavaScript/g,
+      ),
+    ];
+    const rendererJsExpression =
+      rendererMatches[rendererMatches.length - 1]?.[1];
     expect(rendererJsExpression).toBeDefined();
     const rendererJs = Function(
       "payload",
       `const js=${rendererJsExpression}; return js;`,
-    )({ text: ["Factory Desktop 0.116.1", "System Droid CLI 0.159.1"], command: "" });
+    )({
+      text: [
+        "Factory Desktop update ready",
+        "Current 0.116.1",
+        "Latest 0.117.0",
+      ],
+      command: "factory-update-manager install-ready",
+      cta: "Copy install command",
+    });
     expect(() => Function("d", rendererJs)).not.toThrow();
     const separatorLiteral = rendererJs.match(/d\.text\.join\(([^)]*)\)/)?.[1];
     expect(separatorLiteral).toBeDefined();
     const renderedText = Function(
-      `return ["Factory Desktop 0.116.1","System Droid CLI 0.159.1"].join(${separatorLiteral});`,
+      `return ["Factory Desktop update ready","Current 0.116.1","Latest 0.117.0"].join(${separatorLiteral});`,
     )();
-    expect(renderedText).toBe("Factory Desktop 0.116.1\nSystem Droid CLI 0.159.1");
+    expect(renderedText).toBe("Factory Desktop update ready\nCurrent 0.116.1\nLatest 0.117.0");
     expect(patchedContent).toContain("install-ready");
     expect(patchedContent).toContain("check-now");
-    expect(patchedContent).toContain("Remote daemon");
-    expect(patchedContent).toContain("droid daemon --remote-access");
+    expect(patchedContent).not.toContain("Remote daemon");
+    expect(patchedContent).not.toContain("factory-droid-daemon.service");
+    expect(patchedContent).not.toContain("droid-remote-access.service");
     expect(patchedContent).not.toContain("process.kill(Number(pid)");
     // Regression: candidate_version equal to current version must not render
     // as an update. Both About dialog and visible chip use cv !== v guards.
@@ -303,14 +318,14 @@ describe("patchAboutPanel", () => {
     expect(migratedContent).not.toContain("bottom:10px");
     expect(migratedContent).toContain("top:38px");
     expect(migratedContent).toContain("min-width:220px");
-    expect(migratedContent).toContain("Factory Desktop");
-    expect(migratedContent).toContain("System Droid CLI");
+    expect(migratedContent).toContain("Factory Desktop update available");
+    expect(migratedContent).not.toContain("System Droid CLI");
     expect(migratedContent).not.toContain('parts.join(" · ")');
     expect(migratedTopContent).not.toContain("top:44px");
     expect(migratedTopContent).toContain("top:38px");
     expect(migratedTopContent).toContain("min-width:220px");
-    expect(migratedTopContent).toContain("Factory Desktop");
-    expect(migratedTopContent).toContain("System Droid CLI");
+    expect(migratedTopContent).toContain("Factory Desktop update available");
+    expect(migratedTopContent).not.toContain("System Droid CLI");
   });
 
   it("adds the visible chip to bundles that already have only the About patch", async () => {

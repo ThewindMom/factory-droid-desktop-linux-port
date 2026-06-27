@@ -103,6 +103,14 @@ describe("ArtifactTracker", () => {
       expect(violations).toHaveLength(0);
     });
 
+    it("does not flag source-owned systemd service units as proprietary", () => {
+      const serviceFile = path.join(projectRoot, "src", "factory-droid-daemon.service");
+      fs.writeFileSync(serviceFile, "[Service]\nExecStart=/bin/true\n");
+
+      const violations = tracker.checkNoProprietaryInSource(projectRoot);
+      expect(violations).toHaveLength(0);
+    });
+
     it("all generated directories are gitignored", () => {
       // Verify the configured generated directory names match gitignore entries
       const gitignorePath = path.join(projectRoot, ".gitignore");

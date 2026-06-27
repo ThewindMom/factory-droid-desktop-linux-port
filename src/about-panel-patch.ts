@@ -81,11 +81,10 @@ const CHIP_CLOSE_BUTTON_CSS =
 const CHIP_UPDATE_BUTTON_CSS =
   "margin-top:9px;width:100%;border:1px solid rgba(255,255,255,.22);border-radius:10px;padding:7px 10px;background:rgba(255,255,255,.92);color:rgba(18,18,18,.96);font:600 12px/1.2 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;cursor:pointer;";
 const OLD_CHIP_FACTORY_LABEL = 'const parts=["Factory "+v];';
-const CHIP_FACTORY_LABEL = 'const parts=["Factory Desktop "+v];';
+const CHIP_FACTORY_LABEL = 'const parts=["Factory Desktop update available"];';
 const OLD_CHIP_DROID_LABEL =
   'if(b.droidVersion)parts.push("Droid "+b.droidVersion);';
-const CHIP_DROID_LABEL =
-  'if(typeof sdv!=="undefined"&&sdv)parts.push("System Droid CLI "+sdv);else parts.push("System Droid CLI not found");';
+const CHIP_DROID_LABEL = "";
 const OLD_CHIP_TEXT_JOIN = 'const text=parts.join(" · ");';
 const CHIP_TEXT_JOIN = 'const text=parts.join("\\n");';
 
@@ -179,35 +178,29 @@ function buildInjectedVisibleVersionChip(
   return (
     `${windowRef}.webContents.on("did-finish-load",()=>{${originalHandlerBody};` +
     `(()=>{${CHIP_PATCH_MARKER}const render=()=>{try{` +
-    `const p=require("path"),f=require("fs"),cp=require("child_process"),os=require("os");` +
+    `const p=require("path"),f=require("fs"),os=require("os");` +
     `let r=p.dirname(process.execPath);` +
     `if(f.existsSync(p.join(r,".factory-linux","build-info.json"))===false)` +
     `r=p.dirname(p.dirname(process.execPath));` +
     `let b={};try{b=JSON.parse(f.readFileSync(p.join(r,".factory-linux","build-info.json"),"utf-8"))}catch(e){}` +
-    `let sdv=b.systemDroidVersion||"";try{const c=[p.join(os.homedir(),".local","bin","droid"),"/usr/local/bin/droid","/usr/bin/droid"];let dp="";if(process.env.FACTORY_DROID_PATH&&f.existsSync(process.env.FACTORY_DROID_PATH))dp=process.env.FACTORY_DROID_PATH;try{if(!dp)dp=cp.execFileSync("sh",["-lc","command -v droid"],{encoding:"utf-8",timeout:2000}).trim()}catch(e){}if(!dp){for(const x of c)if(f.existsSync(x)){dp=x;break}}if(dp)sdv=cp.execFileSync(dp,["--version"],{encoding:"utf-8",timeout:2500}).trim()}catch(e){}` +
-    `let remoteDaemonVersion="",remoteDaemonStale=false;try{if(process.platform==="linux"&&sdv&&f.existsSync("/proc")){for(const pid of f.readdirSync("/proc")){if(!/^\\d+$/.test(pid))continue;let cmd="";try{cmd=f.readFileSync("/proc/"+pid+"/cmdline","utf-8").replace(/\\0/g," ")}catch(e){}if(!cmd.includes("daemon")||!cmd.includes("--remote-access")||!cmd.includes("droid"))continue;try{const rv=cp.execFileSync("/proc/"+pid+"/exe",["--version"],{encoding:"utf-8",timeout:2500}).trim();if(rv&&rv!==sdv){remoteDaemonVersion=rv;remoteDaemonStale=true;break}}catch(e){}}}}catch(e){}` +
     `let s={};const sd=process.env.XDG_STATE_HOME||p.join(os.homedir(),".local","state");` +
     `try{s=JSON.parse(f.readFileSync(p.join(sd,"factory-update-manager","state.json"),"utf-8"))}catch(e){}` +
-    `const v=b.factoryVersion||${appGetVersionRef};` +
-    `const parts=["Factory Desktop "+v];` +
-    `if(sdv)parts.push("System Droid CLI "+sdv);else parts.push("System Droid CLI not found");` +
-    `const up=["update_detected","downloading_dmg","preparing_workspace","building_package","ready_to_install","waiting_for_app_exit","installing"],cv=s.candidate_version;` +
-    `const desktopUpdate=!!(cv&&cv!==v),ready=s.status==="ready_to_install"||s.status==="waiting_for_app_exit";` +
-    `let command="";` +
-    `if(desktopUpdate){parts.push((ready?"Ready to update Desktop to ":"Desktop update available: ")+cv);command=ready?"factory-update-manager install-ready":"factory-update-manager check-now"}` +
-    `else if(cv===v||s.status==="idle"||s.status==="installed")parts.push("Up to date");` +
-    `else if(up.includes(s.status)){parts.push("Preparing update");command="factory-update-manager check-now"}` +
-    `else if(s.status==="failed"){parts.push("Update check failed");command="factory-update-manager check-now"}` +
-    `else if(s.status==="checking_upstream")parts.push("Checking for updates");` +
-    `if(remoteDaemonStale){parts.push("Remote daemon "+remoteDaemonVersion+" still running");if(!command)command='pkill -f "droid daemon --remote-access"; droid daemon --remote-access'}` +
-    `const payload={text:parts,command};` +
+    `const v=b.factoryVersion||${appGetVersionRef},cv=s.candidate_version;` +
+    `const ready=s.status==="ready_to_install"||s.status==="waiting_for_app_exit";` +
+    `const preparing=["downloading_dmg","preparing_workspace","building_package","installing"].includes(s.status);` +
+    `const desktopUpdate=!!(cv&&cv!==v);` +
+    `if(!desktopUpdate){const js="(()=>{const e=document.getElementById('factory-linux-version-chip');if(e)e.remove()})()";${windowRef}.webContents.executeJavaScript(js,true).catch(()=>{});return}` +
+    `let headline=ready?"Factory Desktop update ready":preparing?"Preparing Factory Desktop update":"Factory Desktop update available";` +
+    `const parts=[headline,"Current "+v,"Latest "+cv];` +
+    `if(ready)parts.push("Install when Factory is closed");else if(preparing)parts.push("Preparing update package");else parts.push("Run update check to prepare it");` +
+    `const command=ready?"factory-update-manager install-ready":"factory-update-manager check-now";` +
+    `const payload={text:parts,command,cta:ready?"Copy install command":"Copy update command"};` +
     `const js="(()=>{const d="+JSON.stringify(payload)+";if(sessionStorage.getItem('factory-linux-version-panel-hidden')==='1')return;let e=document.getElementById('factory-linux-version-chip');` +
-    `if(!e){e=document.createElement('div');e.id='factory-linux-version-chip';e.setAttribute('role','status');e.setAttribute('aria-label','Factory version status');e.style.cssText='${CHIP_STYLE_CSS}';` +
-    `const c=document.createElement('button');c.type='button';c.setAttribute('aria-label','Hide version status');c.textContent='×';c.style.cssText='${CHIP_CLOSE_BUTTON_CSS}';c.onclick=()=>{sessionStorage.setItem('factory-linux-version-panel-hidden','1');e.remove()};e.appendChild(c);` +
-    `const body=document.createElement('div');body.id='factory-linux-version-chip-body';body.style.cssText='padding-right:18px;white-space:pre-line;';e.appendChild(body);` +
-    `const code=document.createElement('code');code.id='factory-linux-version-command';code.style.cssText='display:none;margin-top:9px;padding:7px 8px;border-radius:8px;background:rgba(255,255,255,.08);color:rgba(255,255,255,.82);font:11px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;user-select:text;';e.appendChild(code);` +
-    `const btn=document.createElement('button');btn.type='button';btn.id='factory-linux-version-update';btn.style.cssText='${CHIP_UPDATE_BUTTON_CSS}';btn.textContent='Copy update command';btn.onclick=async()=>{try{await navigator.clipboard.writeText(d.command);btn.textContent='Copied'}catch(_){btn.textContent=d.command}};e.appendChild(btn);document.body.appendChild(e)}` +
-    `const body=e.querySelector('#factory-linux-version-chip-body');if(body)body.textContent=d.text.join('\\\\n');const code=e.querySelector('#factory-linux-version-command');if(code){code.textContent=d.command;code.style.display=d.command?'block':'none'}const btn=e.querySelector('#factory-linux-version-update');if(btn){btn.style.display=d.command?'block':'none';if(d.command)btn.textContent='Copy update command'}})()";` +
+    `if(!e){e=document.createElement('div');e.id='factory-linux-version-chip';e.setAttribute('role','status');e.setAttribute('aria-label','Factory Desktop update status');e.style.cssText='${CHIP_STYLE_CSS}';` +
+    `const c=document.createElement('button');c.type='button';c.setAttribute('aria-label','Hide update status');c.textContent='×';c.style.cssText='${CHIP_CLOSE_BUTTON_CSS}';c.onclick=()=>{sessionStorage.setItem('factory-linux-version-panel-hidden','1');e.remove()};e.appendChild(c);` +
+    `const body=document.createElement('div');body.id='factory-linux-version-chip-body';body.style.cssText='padding-right:18px;white-space:pre-line;text-wrap:balance;';e.appendChild(body);` +
+    `const btn=document.createElement('button');btn.type='button';btn.id='factory-linux-version-update';btn.style.cssText='${CHIP_UPDATE_BUTTON_CSS}';btn.textContent=d.cta||'Copy update command';btn.onclick=async()=>{try{await navigator.clipboard.writeText(d.command);btn.textContent='Copied'}catch(_){btn.textContent=d.command}};e.appendChild(btn);document.body.appendChild(e)}` +
+    `const body=e.querySelector('#factory-linux-version-chip-body');if(body)body.textContent=d.text.join('\\\\n');const code=e.querySelector('#factory-linux-version-command');if(code)code.remove();const btn=e.querySelector('#factory-linux-version-update');if(btn){btn.style.display=d.command?'block':'none';if(d.command)btn.textContent=d.cta||'Copy update command'}})()";` +
     `${windowRef}.webContents.executeJavaScript(js,true).catch(()=>{})` +
     `}catch(e){}};render();if(!${windowRef}.__factoryLinuxVersionChipTimer){${windowRef}.__factoryLinuxVersionChipTimer=setInterval(render,5000);${windowRef}.on("closed",()=>{clearInterval(${windowRef}.__factoryLinuxVersionChipTimer);${windowRef}.__factoryLinuxVersionChipTimer=null})}})()})`
   );
